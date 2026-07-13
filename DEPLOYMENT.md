@@ -14,7 +14,15 @@ catkin_make
 source devel/setup.bash
 ```
 
-如通过 ZIP 安装，解压后执行同样的构建命令即可。
+如通过 ZIP 安装，解压后先恢复 ROS 节点脚本的可执行权限，再执行同样的构建命令：
+
+```bash
+cd ~/smartcar2026-simulation
+chmod +x start_v3_clean.sh
+find src/car3/scripts -type f -name '*.py' -exec chmod +x {} +
+```
+
+通过 Git 克隆时可执行权限会自动保留，无需执行这一步。
 
 ## 3. 两阶段启动
 
