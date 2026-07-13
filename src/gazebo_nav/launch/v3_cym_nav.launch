@@ -1,0 +1,39 @@
+<launch>
+  <arg name="rviz" default="true"/>
+  <arg name="map_file" default="$(find gazebo_map)/map/ros_map_thin.yaml"/>
+
+  <node name="map_server" pkg="map_server" type="map_server" args="$(arg map_file)"/>
+  <node name="goal_coordinate_logger" pkg="car3" type="goal_coordinate_logger.py" output="screen"/>
+  <node name="map_to_odom" pkg="tf2_ros" type="static_transform_publisher"
+        args="0 0 0 0 0 0 map odom" output="screen"/>
+
+  <node pkg="move_base" type="move_base" respawn="false" name="move_base" output="screen" clear_params="true">
+    <param name="base_global_planner" value="global_planner/GlobalPlanner"/>
+    <param name="base_local_planner" value="cym_planner/CymPlanner"/>
+    <param name="planner_frequency" value="0.0"/>
+    <param name="controller_frequency" value="20.0"/>
+    <param name="planner_patience" value="3.0"/>
+    <!-- CymPlanner 发现前方阻塞会主动返回 false；0.5 秒后进入恢复/重规划，
+         避免沿用原来的 3 秒等待。 -->
+    <param name="controller_patience" value="0.5"/>
+    <param name="recovery_behavior_enabled" value="true"/>
+    <!-- 允许 rotate_recovery 原地旋转，以获取新的激光观测并清理空间。 -->
+    <param name="clearing_rotation_allowed" value="true"/>
+
+    <rosparam file="$(find gazebo_nav)/launch/config/v3_move_base/global_costmap_common.yaml" command="load" ns="global_costmap"/>
+    <rosparam file="$(find gazebo_nav)/launch/config/v3_move_base/global_costmap_params.yaml" command="load" ns="global_costmap"/>
+    <rosparam file="$(find gazebo_nav)/launch/config/v3_move_base/local_costmap_common.yaml" command="load" ns="local_costmap"/>
+    <rosparam file="$(find gazebo_nav)/launch/config/v3_move_base/local_costmap_params.yaml" command="load" ns="local_costmap"/>
+    <rosparam file="$(find gazebo_nav)/launch/config/v3_move_base/global_planner_params.yaml" command="load"/>
+    <!-- 直接加载到 /move_base，不能放进任一 costmap 命名空间。 -->
+    <rosparam file="$(find gazebo_nav)/launch/config/v3_move_base/recovery_behaviors.yaml" command="load"/>
+    <rosparam file="$(find cym_planner)/config/cym_planner_params.json" command="load"/>
+  </node>
+
+  <node if="$(arg rviz)" name="rviz" pkg="rviz" type="rviz"
+        args="-d $(find car3)/rviz/v3_cym_nav.rviz">
+    <env name="DISABLE_ROS1_EOL_WARNINGS" value="1"/>
+    <env name="LIBGL_ALWAYS_SOFTWARE" value="1"/>
+    <env name="QT_X11_NO_MITSHM" value="1"/>
+  </node>
+</launch>

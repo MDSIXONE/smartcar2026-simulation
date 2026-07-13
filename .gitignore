@@ -1,0 +1,16 @@
+# ROS/catkin build output
+/build/
+/devel/
+/install/
+/logs/
+
+# Python and editor state
+**/__pycache__/
+*.py[cod]
+.vscode/
+.idea/
+
+# Local calibration and backup snapshots
+*.before_*
+*.bak
+

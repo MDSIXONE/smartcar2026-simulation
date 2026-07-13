@@ -1,0 +1,13 @@
+<launch>
+  <!-- Backward-compatible alias for the task-only step.  Start the simulator
+       first with task3_prepare.launch. -->
+  <arg name="cargo_item" default=""/>
+  <arg name="cargo_category" default="auto"/>
+  <arg name="cargo_name" default=""/>
+
+  <include file="$(find car3)/launch/task3_execute.launch">
+    <arg name="cargo_item" value="$(arg cargo_item)"/>
+    <arg name="cargo_category" value="$(arg cargo_category)"/>
+    <arg name="cargo_name" value="$(arg cargo_name)"/>
+  </include>
+</launch>

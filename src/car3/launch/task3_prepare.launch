@@ -1,0 +1,24 @@
+<launch>
+  <!-- Step 1 only: start the environment and park the arm.  The arm/gripper
+       controllers are loaded but stopped, so navigation cannot make the arm
+       shake. -->
+  <arg name="gui" default="true"/>
+  <arg name="rviz" default="true"/>
+  <arg name="arm_start_pose" default="-0.0001,-0.4999,1.2800,1.7000,0.0000"/>
+
+  <include file="$(find car3)/launch/v3_cym_gazebo.launch">
+    <arg name="gui" value="$(arg gui)"/>
+    <arg name="rviz" value="$(arg rviz)"/>
+    <arg name="start_arm_controllers" value="false"/>
+    <arg name="set_initial_arm_pose" value="true"/>
+    <arg name="arm_initial_positions" value="$(arg arm_start_pose)"/>
+    <arg name="initial_pose_duration" value="6.0"/>
+    <arg name="initial_transition_steps" value="2"/>
+    <arg name="direct_initial_configuration" value="false"/>
+    <!-- Physics-only support preserves this pose while controllers are off. -->
+    <arg name="disable_arm_gravity" value="true"/>
+    <!-- Reapply only through Gazebo while driving.  This is not a running
+         arm controller; it prevents unpowered joints 3/4 from drifting. -->
+    <arg name="hold_initial_arm_pose" value="true"/>
+  </include>
+</launch>

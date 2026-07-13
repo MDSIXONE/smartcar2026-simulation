@@ -1,0 +1,29 @@
+# 本文件由 v3_cym_nav.launch 直接加载到 /move_base 下。
+# 不能放到 global_costmap 命名空间中：move_base 只会从自身私有命名空间读取
+# recovery_behaviors 及其每个同名行为参数。
+
+# 恢复行为执行顺序。name 必须与下方参数块名称一致；type 是 move_base 通过
+# pluginlib 创建的恢复插件类型。
+recovery_behaviors:
+  # 第一步：仅清除远处/过期的激光障碍，再尝试重规划。
+  - name: 'conservative_reset'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
+  # 第二步：原地旋转，获取被阻塞方向的新 /scan 观测。
+  - name: 'rotate_recovery'
+    type: 'rotate_recovery/RotateRecovery'
+  # 第三步：兜底，完全清除指定的动态障碍层。
+  - name: 'aggressive_reset'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
+
+conservative_reset:
+  # 单位为米。保留机器人附近的障碍观测，清除该距离以外的过期观测，
+  # 然后再次执行全局重规划。
+  reset_distance: 2.0
+  # 只清除激光产生的动态障碍层；静态地图保持不变，膨胀层会根据剩余障碍重算代价。
+  layer_names: ["obstacle_layer"]
+
+aggressive_reset:
+  # 0.0 表示不保留任何区域：完全清除指定层的数据。
+  # 若真实障碍仍存在，ObstacleLayer 会在下一帧 /scan 中重新标记它。
+  reset_distance: 0.0
+  layer_names: ["obstacle_layer"]

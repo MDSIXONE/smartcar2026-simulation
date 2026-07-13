@@ -1,0 +1,67 @@
+﻿# CymPlanner 局部规划器参数
+# 修改本文件后不需要重新编译，只需重新运行 ./start_v3_clean.sh
+{
+    "CymPlanner": {
+        # 机器人本体坐标系
+        "base_link_frame": "base_link",
+
+        # 里程计坐标系
+        "odom_frame": "odom",
+
+        # 前视距离，数值越大越平滑，数值越小越贴近路径
+        "lookahead_distance": 0.5,
+
+        # 前进速度增益：前方路径点距离乘以该值，决定提速快慢
+        "linear_x_gain": 10.0,
+
+        # 前进位置环D项：抑制速度变化和接近路径点时的冲动，建议从0.05开始调整
+        "linear_x_kd": 0.05,
+
+        # 当前禁止横向平移，此参数暂不参与车辆控制
+        "linear_y_gain": 5.0,
+
+        # 转向增益：数值越大，车头对准路径的力度越强
+        "angular_gain": 14.0,
+
+        # 最大前进速度，单位 m/s
+        "max_vel_x": 14.0,
+
+        # 当前禁止横向平移，此参数暂不参与车辆控制
+        "max_vel_y": 15.0,
+
+        # 最大旋转速度，单位 rad/s
+        "max_vel_theta": 20.5,
+
+        # 到达路径终点后的独立朝向对准参数。
+        # final_yaw_gain 越大，终点旋转越快；建议 1.5 ~ 3.0。
+        "final_yaw_gain": 12.0,
+
+        # 终点旋转速度上限，单位 rad/s；建议 0.8 ~ 1.5。
+        "final_yaw_max_vel": 10.2,
+
+        # 终点方向误差小于该值即视为完成，单位 rad。
+        "final_yaw_tolerance": 0.10,
+
+        # 终点方向对准时保留的前后微调增益；设为 0 可只原地旋转。
+        "final_linear_x_gain": 1.5,
+
+        # 任务节点在夹取完成后发布 /sim_task3/carry_mode=true。
+        # 载物通过障碍物加工区时，前进、转向和终点对正最高速度均乘以此值。
+        "carry_speed_scale": 0.80,
+
+        # 车头方向容差，单位 rad；当前边走边转逻辑中保留备用
+        "heading_tolerance": 0.20,
+
+        # 局部轨迹模拟时长，单位秒
+        "simulation_time": 0.3,
+
+        # 局部轨迹模拟步长，单位秒
+        "simulation_step": 0.05,
+
+        # 沿全局路径向前检查的实际距离，单位 m；命中障碍后请求 move_base 重规划
+        "obstacle_lookahead_distance": 0.8,
+
+        # 253 覆盖膨胀区，254 为致命障碍；代码按 cost >= 此值判定
+        "obstacle_cost_threshold": 253
+    }
+}

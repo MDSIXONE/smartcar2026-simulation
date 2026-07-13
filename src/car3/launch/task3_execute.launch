@@ -1,0 +1,17 @@
+<launch>
+  <!-- Step 2 only: run after task3_prepare.launch is already active. -->
+  <!-- Either provide cargo_item (automatic category inference) or explicitly
+       provide cargo_category.  Examples: cargo_item:=苹果, cargo_category:=电子产品. -->
+  <arg name="cargo_item" default=""/>
+  <arg name="cargo_category" default="auto"/>
+  <arg name="cargo_name" default=""/>
+
+  <node name="task3_pick_deliver" pkg="car3" type="task3_pick_deliver.py" output="screen">
+    <param name="cargo_item" value="$(arg cargo_item)"/>
+    <param name="cargo_category" value="$(arg cargo_category)"/>
+    <param name="cargo_name" value="$(arg cargo_name)"/>
+    <param name="arm_grasp_pose" value="-0.0001,1.5000,0.2800,1.3000,0.0000"/>
+    <param name="arm_carry_pose" value="-0.0001,0.0000,-1.7200,-0.5000,0.0000"/>
+    <param name="wait_for_initial_arm_pose" value="false"/>
+  </node>
+</launch>
