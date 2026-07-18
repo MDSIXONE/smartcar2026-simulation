@@ -8,6 +8,14 @@ catkin_package()
 
 find_package(roslaunch)
 
+if(CATKIN_ENABLE_TESTING)
+  find_package(PythonInterp REQUIRED)
+  add_test(NAME cube_mesh_uri
+    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_cube_mesh_uri.py)
+  add_test(NAME sign_mesh_uri
+    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_sign_mesh_uri.py)
+endif()
+
 catkin_install_python(PROGRAMS
   scripts/gripper_mimic.py
   scripts/grasp_attach.py

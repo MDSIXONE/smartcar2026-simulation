@@ -35,6 +35,13 @@ roslaunch car3 task3_execute.launch cargo_category:="电子产品" cargo_name:="
 
 完整任务说明、手动标定、故障排查与参数说明见 [TASK3_RUNBOOK.md](TASK3_RUNBOOK.md)。
 
+## WSL Ubuntu 20.04 deployment
+
+For a reproducible local WSL setup, ROS Master environment, Gazebo startup,
+and visible-asset checks, see [docs/LOCAL_WSL_20.04.md](docs/LOCAL_WSL_20.04.md).
+The portable cube and scene-label asset changes are recorded in
+[docs/changes/2026-07-18-portable-gazebo-assets.md](docs/changes/2026-07-18-portable-gazebo-assets.md).
+
 ## 目录
 
 | 目录 | 内容 |

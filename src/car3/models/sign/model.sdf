@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<sdf version="1.7">
+  <model name="task3_signs">
+    <static>true</static>
+    <link name="link"/>
+  </model>
+</sdf>
