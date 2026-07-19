@@ -1,8 +1,9 @@
 <?xml version="1.0"?>
 <library path="lib/libcym_planner">
- <class name="cym_planner/CymPlanner" type="cym_planner::CymPlanner" base_class_type="nav_core::BaseLocalPlanner">
-  <description>
-    CYMµÄ¹æ»®Æ÷
-  </description>
- </class>
+  <class
+      name="cym_planner/CymPlanner"
+      type="cym_planner::CymPlanner"
+      base_class_type="nav_core::BaseLocalPlanner">
+    <description>CYM footprint-aware local path tracker.</description>
+  </class>
 </library>

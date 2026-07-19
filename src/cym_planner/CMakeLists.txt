@@ -1,22 +1,26 @@
 cmake_minimum_required(VERSION 3.0.2)
 project(cym_planner)
 
-## Compile as C++11, supported in ROS Kinetic and newer
-# add_compile_options(-std=c++11)
+add_compile_options(-std=c++14 -Wall)
 
 ## Find catkin macros and libraries
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
 ## is used, also find other catkin packages
 find_package(catkin REQUIRED COMPONENTS
+  angles
+  base_local_planner
+  costmap_2d
+  geometry_msgs
+  nav_msgs
   nav_core
   pluginlib
   roscpp
   std_msgs
+  tf2
+  tf2_geometry_msgs
+  tf2_ros
+  visualization_msgs
 )
-
-## System dependencies are found with CMake's conventions
-# find_package(Boost REQUIRED COMPONENTS system)
-find_package(OpenCV REQUIRED)
 
 ## Uncomment this if the package has a setup.py. This macro ensures
 ## modules and global scripts declared therein get installed
@@ -104,10 +108,22 @@ find_package(OpenCV REQUIRED)
 ## CATKIN_DEPENDS: catkin_packages dependent projects also need
 ## DEPENDS: system dependencies of this project that dependent projects also need
 catkin_package(
-#  INCLUDE_DIRS include
-#  LIBRARIES cym_planner
-#  CATKIN_DEPENDS nav_core pluginlib roscpp
-#  DEPENDS system_lib
+  INCLUDE_DIRS include
+  LIBRARIES cym_planner
+  CATKIN_DEPENDS
+    angles
+    base_local_planner
+    costmap_2d
+    geometry_msgs
+    nav_msgs
+    nav_core
+    pluginlib
+    roscpp
+    std_msgs
+    tf2
+    tf2_geometry_msgs
+    tf2_ros
+    visualization_msgs
 )
 
 ###########
@@ -119,7 +135,6 @@ catkin_package(
 include_directories(
   include
   ${catkin_INCLUDE_DIRS}
-  ${OpenCV_INCLUDE_DIRS}
 )
 
 ## Declare a C++ library
@@ -132,7 +147,6 @@ add_dependencies(cym_planner ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORT
 
 target_link_libraries(cym_planner
    ${catkin_LIBRARIES}
-   ${OpenCV_LIBRARIES}
  )
 
 ## Add cmake target dependencies of the library
@@ -182,18 +196,17 @@ target_link_libraries(cym_planner
 
 ## Mark libraries for installation
 ## See http://docs.ros.org/melodic/api/catkin/html/howto/format1/building_libraries.html
-# install(TARGETS ${PROJECT_NAME}
-#   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-#   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-#   RUNTIME DESTINATION ${CATKIN_GLOBAL_BIN_DESTINATION}
-# )
+install(TARGETS cym_planner
+  ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+  RUNTIME DESTINATION ${CATKIN_GLOBAL_BIN_DESTINATION}
+)
 
 ## Mark cpp header files for installation
-# install(DIRECTORY include/${PROJECT_NAME}/
-#   DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
-#   FILES_MATCHING PATTERN "*.h"
-#   PATTERN ".svn" EXCLUDE
-# )
+install(DIRECTORY include/
+  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
+  FILES_MATCHING PATTERN "*.h"
+)
 
 ## Mark other files for installation (e.g. launch and bag files, etc.)
  install(FILES
@@ -201,9 +214,23 @@ target_link_libraries(cym_planner
    DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
  )
 
+install(DIRECTORY config/
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/config
+)
+
 #############
 ## Testing ##
 #############
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(cym_planner_geometry_test
+    test/test_cym_planner_geometry.cpp)
+  if(TARGET cym_planner_geometry_test)
+    target_link_libraries(cym_planner_geometry_test
+      cym_planner
+      ${catkin_LIBRARIES})
+  endif()
+endif()
 
 ## Add gtest based cpp test target and link libraries
 # catkin_add_gtest(${PROJECT_NAME}-test test/test_cym_planner.cpp)

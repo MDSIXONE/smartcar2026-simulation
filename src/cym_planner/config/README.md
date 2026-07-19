@@ -1,84 +1,46 @@
-# cym_planner 配置说明
+# CymPlanner 配置与第一阶段调试
 
-## 这是什么？
+`CymPlanner` 是 `nav_core::BaseLocalPlanner` 插件。当前优化分支包含第一至第三阶段的核心链路：
 
-`cym_planner` 是一个局部路径规划器插件。它需要知道机器人的两个坐标系名字：
-- **机器人本体坐标系**（默认 `base_link`）
-- **里程计坐标系**（默认 `odom`）
+- 从全局路径最近点截取并等距采样局部参考路径；
+- 使用机器人完整 Footprint 对路径段做平移、旋转插值扫掠；
+- 从 local costmap 建立多源距离场，让左右障碍对横向偏移产生连续梯度；
+- 安全时用 Pure Pursuit 跟踪；
+- 碰撞时按减速度制动，超时后请求 `move_base` 重规划或恢复；
+- 终点停车后单独对准最终朝向。
+- 参考路径碰撞后生成左绕/右绕候选，并锁定拓扑方向；
+- 在锁定方向内对连续横向偏移做平滑、障碍距离和时间连续性细化；
+- 原路径恢复安全后经过保持时间，再指数平滑回归。
 
-如果你的机器人坐标系名跟默认值不一样，不用改代码，直接改 JSON 配置文件就行。
+## 启用插件
 
----
-## 如何使用？
+`move_base` 启动文件中需要包含：
 
-找到你的 move_base 节点，一般在你的启动launch里：
-
-然后找到base_local_planner,改成下面这个
-
-
-    <param name="base_local_planner" value="cym_planner/CymPlanner" />
-
-
-</node>
-
-
-## 注意事项
-
-配置文件里的名字必须跟 TF 树里**完全一致**（大小写、下划线都要对上），否则会报错。
-
-### 方法 ：实时图形界面查看
-
-```bash
-rosrun rqt_tf_tree rqt_tf_tree
+```xml
+<param name="base_local_planner" value="cym_planner/CymPlanner"/>
+<rosparam file="$(find cym_planner)/config/cym_planner_params.json" command="load"/>
 ```
 
-弹出一个窗口，实时显示当前所有坐标系的父子关系。
+配置文件根节点保持为 `CymPlanner`。默认本体坐标系是 `base_link`，局部规划坐标系直接使用 local costmap 的 `global_frame`。
 
+## RViz 调试话题
 
-```
-base_footprint──> base_link
-              └─> laser_link
-```
+- `/cym_planner/reference_path`：黄色显示较合适的局部参考路径；
+- `/cym_planner/left_seed_path`：左绕候选；
+- `/cym_planner/right_seed_path`：右绕候选；
+- `/cym_planner/selected_path`：当前实际跟踪路径；
+- `/cym_planner/predicted_footprints`：红色碰撞 Footprint；
+- `/cym_planner/planner_state`：`TRACK`、`STOPPING` 或 `GOAL_ALIGN`。
 
-找到机器人本体对应的那个 base_link 名字，如果和json里的不一样，就需要把json里的改掉。
+`reference_path` 和 `selected_path` 使用 `nav_msgs/Path`，Footprint 使用 `visualization_msgs/MarkerArray`。
 
----
+## 第一轮测试顺序
 
-## 怎么改配置
+1. 无障碍直线与转弯，确认 Pure Pursuit 稳定；
+2. 让障碍只侵入车体侧边，确认中心路径点未碰撞时仍能发现 Footprint 碰撞；
+3. 在左右均有空间时检查候选评分和方向锁定，不应左右来回切换；
+4. 测试转角靠墙、距离场梯度和 local costmap 边界；
+5. 确认碰撞时速度平滑降为零，持续无解后 `move_base` 能重新规划；
+6. 障碍消失后确认路径经过保持时间再平滑回归。
 
-查到实际名字后如果不是，就要编辑文件：
-
-`config/cym_planner_params.json`
-
-```json
-{
-    "cym_planner/CymPlanner": {
-        "base_link_frame": "base_link",
-        "odom_frame": "odom"
-    }
-}
-```
-
-把 `base_link_frame` 和 `odom_frame` 后面的值，改成你查到的真实名字。比如你的机器人体坐标系叫 `xxx/base_link`：
-
-```json
-{
-    "cym_planner/CymPlanner": {
-        "base_link_frame": "xxx/base_link",
-        "odom_frame": "odom"
-    }
-}
-
-```
-
-> 改的时候只改引号里的值，外面的 key（`cym_planner/CymPlanner`、`base_link_frame`、`odom_frame`）不要动。
-
-
-
-##  加载 JSON 配置
-
-    <rosparam file="$(find cym_planner)/config/cym_planner_params.json"
-              command="load" />
-
-
-
+初始 `max_vel_x` 刻意设为 `0.15 m/s`。碰撞预测和制动确认稳定后再逐步提高。

@@ -1,398 +1,1702 @@
 #include "cym_planner.h"
+
+#include <algorithm>
+#include <clocale>
+#include <cmath>
+#include <functional>
+#include <limits>
+#include <queue>
+
+#include <angles/angles.h>
+#include <costmap_2d/cost_values.h>
+#include <costmap_2d/footprint.h>
 #include <pluginlib/class_list_macros.h>
-#include <opencv2/highgui/highgui.hpp>
-#include <opencv2/imgproc/imgproc.hpp>
-#include <tf/tf.h>
-#include <tf/transform_datatypes.h>
-#include <tf/transform_listener.h>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/utils.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <visualization_msgs/Marker.h>
 
 PLUGINLIB_EXPORT_CLASS(cym_planner::CymPlanner, nav_core::BaseLocalPlanner)
 
+namespace
+{
+
+constexpr double kEpsilon = 1e-6;
+
+double clampValue(double value, double lower, double upper)
+{
+    return std::max(lower, std::min(value, upper));
+}
+
+template <typename T>
+void loadPlannerParam(
+    const ros::NodeHandle& planner_nh,
+    const ros::NodeHandle& legacy_nh,
+    const std::string& key,
+    T& value,
+    const T& default_value)
+{
+    if (!planner_nh.getParam(key, value) && !legacy_nh.getParam(key, value))
+    {
+        value = default_value;
+    }
+}
+
+}  // namespace
+
 namespace cym_planner
 {
-    CymPlanner::CymPlanner()
+
+CymPlanner::CymPlanner()
+{
+    std::setlocale(LC_ALL, "");
+}
+
+CymPlanner::~CymPlanner() = default;
+
+void CymPlanner::initialize(
+    std::string name,
+    tf2_ros::Buffer* tf,
+    costmap_2d::Costmap2DROS* costmap_ros)
+{
+    if (initialized_)
     {
-        setlocale(LC_ALL, "");
+        ROS_WARN("cym_planner: initialize called more than once");
+        return;
     }
-    CymPlanner::~CymPlanner()
-    {}
-
-    tf::TransformListener* tf_listener_;
-    costmap_2d::Costmap2DROS* costmap_ros_;
-    // ===== TF 坐标系名称（通过 ROS 参数配置，无需重新编译即可适配不同机器人）=====
-    std::string base_link_frame_;   // 机器人本体坐标系 (默认: base_link)
-    std::string odom_frame_;        // 里程计坐标系      (默认: odom)
-    double linear_x_gain_;
-    double linear_x_kd_;
-    double angular_gain_;
-    double max_vel_x_;
-    double max_vel_theta_;
-    // Final pose alignment uses its own gains.  It must not inherit the
-    // path-following gain because the vehicle is already at the goal here.
-    double final_yaw_gain_;
-    double final_yaw_max_vel_;
-    double final_yaw_tolerance_;
-    double final_linear_x_gain_;
-    double heading_tolerance_;
-    double obstacle_lookahead_distance_;
-    int obstacle_cost_threshold_;
-    double previous_linear_error_;
-    ros::Time previous_control_time_;
-    bool linear_derivative_initialized_;
-    void CymPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap_2d::Costmap2DROS* costmap_ros)
+    if (tf == nullptr || costmap_ros == nullptr || costmap_ros->getCostmap() == nullptr)
     {
-        ROS_WARN("%s", u8"\u8be5\u6211\u4e0a\u573a\u8868\u6f14\u4e86!");
-        tf_listener_ = new tf::TransformListener();
-        costmap_ros_ = costmap_ros;
-
-        // ===== 从 ROS 参数服务器读取坐标系名称 =====
-        // name 通常为 "cym_planner/CymPlanner"（即 base_local_planner 参数值）
-        // 参数命名空间: ~/cym_planner/CymPlanner/  =>  /move_base/cym_planner/CymPlanner/
-        // 在 yaml 中对应: cym_planner/CymPlanner: 下的子项
-        ros::NodeHandle planner_nh("~/" + name);
-        ros::NodeHandle legacy_nh("~/CymPlanner");
-        if(!planner_nh.getParam("base_link_frame", base_link_frame_))
-            legacy_nh.param<std::string>("base_link_frame", base_link_frame_, "base_link");
-        if(!planner_nh.getParam("odom_frame", odom_frame_))
-            legacy_nh.param<std::string>("odom_frame", odom_frame_, "odom");
-        if(!planner_nh.getParam("linear_x_gain", linear_x_gain_))
-            legacy_nh.param("linear_x_gain", linear_x_gain_, 1.5);
-        if(!planner_nh.getParam("linear_x_kd", linear_x_kd_))
-            legacy_nh.param("linear_x_kd", linear_x_kd_, 0.0);
-        if(!planner_nh.getParam("angular_gain", angular_gain_))
-            legacy_nh.param("angular_gain", angular_gain_, 2.0);
-        if(!planner_nh.getParam("max_vel_x", max_vel_x_))
-            legacy_nh.param("max_vel_x", max_vel_x_, 1.0);
-        if(!planner_nh.getParam("max_vel_theta", max_vel_theta_))
-            legacy_nh.param("max_vel_theta", max_vel_theta_, 1.5);
-        if(!planner_nh.getParam("final_yaw_gain", final_yaw_gain_))
-            legacy_nh.param("final_yaw_gain", final_yaw_gain_, 2.0);
-        if(!planner_nh.getParam("final_yaw_max_vel", final_yaw_max_vel_))
-            legacy_nh.param("final_yaw_max_vel", final_yaw_max_vel_, 1.2);
-        if(!planner_nh.getParam("final_yaw_tolerance", final_yaw_tolerance_))
-            legacy_nh.param("final_yaw_tolerance", final_yaw_tolerance_, 0.10);
-        if(!planner_nh.getParam("final_linear_x_gain", final_linear_x_gain_))
-            legacy_nh.param("final_linear_x_gain", final_linear_x_gain_, 1.5);
-        if(!planner_nh.getParam("heading_tolerance", heading_tolerance_))
-            legacy_nh.param("heading_tolerance", heading_tolerance_, 0.20);
-        if(!planner_nh.getParam("obstacle_lookahead_distance", obstacle_lookahead_distance_))
-            legacy_nh.param("obstacle_lookahead_distance", obstacle_lookahead_distance_, 0.8);
-        if(!planner_nh.getParam("obstacle_cost_threshold", obstacle_cost_threshold_))
-            legacy_nh.param("obstacle_cost_threshold", obstacle_cost_threshold_, 253);
-        if(!planner_nh.getParam("carry_speed_scale", carry_speed_scale_))
-            legacy_nh.param("carry_speed_scale", carry_speed_scale_, 0.25);
-        obstacle_lookahead_distance_ = std::max(0.0, obstacle_lookahead_distance_);
-        obstacle_cost_threshold_ = std::max(0, std::min(255, obstacle_cost_threshold_));
-        final_yaw_gain_ = std::max(0.0, final_yaw_gain_);
-        final_yaw_max_vel_ = std::max(0.0, final_yaw_max_vel_);
-        final_yaw_tolerance_ = std::max(0.01, std::min(M_PI, final_yaw_tolerance_));
-        final_linear_x_gain_ = std::max(0.0, final_linear_x_gain_);
-        carry_speed_scale_ = std::max(0.05, std::min(1.0, carry_speed_scale_));
-        carry_mode_ = false;
-        ros::NodeHandle public_nh;
-        carry_mode_sub_ = public_nh.subscribe(
-            "/sim_task3/carry_mode", 1, &CymPlanner::carryModeCallback, this);
-        previous_linear_error_ = 0.0;
-        previous_control_time_ = ros::Time(0);
-        linear_derivative_initialized_ = false;
-        ROS_WARN("cym_planner initialized | linear kp/kd: %.2f/%.2f | max_vel_x: %.2f | max_vel_theta: %.2f | final yaw gain/max/tolerance: %.2f/%.2f/%.3f | obstacle lookahead/threshold: %.2f/%d",
-                 linear_x_gain_, linear_x_kd_, max_vel_x_, max_vel_theta_,
-                 final_yaw_gain_, final_yaw_max_vel_, final_yaw_tolerance_,
-                 obstacle_lookahead_distance_, obstacle_cost_threshold_);
+        ROS_ERROR("cym_planner: initialize received a null TF buffer or costmap");
+        return;
     }
 
-    void CymPlanner::carryModeCallback(const std_msgs::Bool::ConstPtr& message)
+    tf_buffer_ = tf;
+    costmap_ros_ = costmap_ros;
+    local_frame_ = costmap_ros_->getGlobalFrameID();
+    world_model_.reset(
+        new base_local_planner::CostmapModel(*costmap_ros_->getCostmap()));
+
+    footprint_ = costmap_ros_->getRobotFootprint();
+    if (footprint_.empty())
     {
-        if(carry_mode_ == message->data)
-            return;
-        carry_mode_ = message->data;
-        ROS_WARN("cym_planner carry mode %s; speed scale %.2f",
-                 carry_mode_ ? "enabled" : "disabled",
-                 carry_mode_ ? carry_speed_scale_ : 1.0);
+        ROS_ERROR("cym_planner: robot footprint is empty");
+        return;
     }
-    std::vector<geometry_msgs::PoseStamped> global_plan_;
-    int target_index_;
-    bool pose_adjusting_;
-    bool goal_reached_;
-    bool CymPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& plan)
+    costmap_2d::calculateMinAndMaxDistances(
+        footprint_, inscribed_radius_, circumscribed_radius_);
+
+    ros::NodeHandle planner_nh("~/" + name);
+    ros::NodeHandle legacy_nh("~/CymPlanner");
+
+    loadPlannerParam(planner_nh, legacy_nh, "base_link_frame", base_link_frame_, std::string("base_link"));
+    loadPlannerParam(planner_nh, legacy_nh, "planning_horizon", planning_horizon_, 2.5);
+    loadPlannerParam(planner_nh, legacy_nh, "collision_horizon", collision_horizon_, 1.2);
+    loadPlannerParam(planner_nh, legacy_nh, "path_resolution", path_resolution_, 0.04);
+    loadPlannerParam(planner_nh, legacy_nh, "collision_check_step", collision_check_step_, 0.025);
+    loadPlannerParam(planner_nh, legacy_nh, "collision_yaw_step", collision_yaw_step_, 0.07);
+    loadPlannerParam(planner_nh, legacy_nh, "transform_timeout", transform_timeout_, 0.10);
+
+    loadPlannerParam(planner_nh, legacy_nh, "lookahead_min", lookahead_min_, 0.20);
+    loadPlannerParam(planner_nh, legacy_nh, "lookahead_max", lookahead_max_, 0.65);
+    loadPlannerParam(planner_nh, legacy_nh, "lookahead_time", lookahead_time_, 0.80);
+
+    loadPlannerParam(planner_nh, legacy_nh, "max_vel_x", max_vel_x_, 0.15);
+    loadPlannerParam(planner_nh, legacy_nh, "max_vel_theta", max_vel_theta_, 0.80);
+    loadPlannerParam(planner_nh, legacy_nh, "acc_lim_x", acc_lim_x_, 0.45);
+    loadPlannerParam(planner_nh, legacy_nh, "dec_lim_x", dec_lim_x_, 0.80);
+    loadPlannerParam(planner_nh, legacy_nh, "acc_lim_theta", acc_lim_theta_, 1.50);
+    loadPlannerParam(planner_nh, legacy_nh, "dec_lim_theta", dec_lim_theta_, 2.00);
+    loadPlannerParam(
+        planner_nh, legacy_nh, "max_lateral_acceleration", max_lateral_acceleration_, 0.50);
+
+    loadPlannerParam(planner_nh, legacy_nh, "final_xy_tolerance", final_xy_tolerance_, 0.05);
+    loadPlannerParam(planner_nh, legacy_nh, "final_yaw_tolerance", final_yaw_tolerance_, 0.10);
+    loadPlannerParam(planner_nh, legacy_nh, "final_yaw_gain", final_yaw_gain_, 2.0);
+    loadPlannerParam(planner_nh, legacy_nh, "final_yaw_max_vel", final_yaw_max_vel_, 0.80);
+
+    loadPlannerParam(planner_nh, legacy_nh, "no_path_grace_time", no_path_grace_time_, 0.50);
+    loadPlannerParam(planner_nh, legacy_nh, "no_path_timeout", no_path_timeout_, 1.00);
+    loadPlannerParam(planner_nh, legacy_nh, "carry_speed_scale", carry_speed_scale_, 0.80);
+
+    loadPlannerParam(planner_nh, legacy_nh, "offset_step", offset_step_, 0.05);
+    loadPlannerParam(planner_nh, legacy_nh, "max_lateral_offset", max_lateral_offset_, 0.50);
+    loadPlannerParam(planner_nh, legacy_nh, "shift_in_distance", shift_in_distance_, 0.60);
+    loadPlannerParam(planner_nh, legacy_nh, "shift_out_distance", shift_out_distance_, 0.80);
+    loadPlannerParam(planner_nh, legacy_nh, "obstacle_pass_margin", obstacle_pass_margin_, 0.35);
+    loadPlannerParam(planner_nh, legacy_nh, "desired_clearance", desired_clearance_, 0.18);
+    loadPlannerParam(planner_nh, legacy_nh, "hard_clearance", hard_clearance_, 0.08);
+    loadPlannerParam(
+        planner_nh, legacy_nh, "distance_gradient_step", distance_gradient_step_, 0.05);
+    loadPlannerParam(
+        planner_nh,
+        legacy_nh,
+        "distance_field_update_period",
+        distance_field_update_period_,
+        0.10);
+    loadPlannerParam(
+        planner_nh, legacy_nh, "optimization_iterations", optimization_iterations_, 12);
+    loadPlannerParam(planner_nh, legacy_nh, "optimization_step", optimization_step_, 0.05);
+    loadPlannerParam(planner_nh, legacy_nh, "weight_reference", weight_reference_, 1.0);
+    loadPlannerParam(planner_nh, legacy_nh, "weight_smooth", weight_smooth_, 8.0);
+    loadPlannerParam(planner_nh, legacy_nh, "weight_obstacle", weight_obstacle_, 12.0);
+    loadPlannerParam(planner_nh, legacy_nh, "weight_temporal", weight_temporal_, 5.0);
+    loadPlannerParam(planner_nh, legacy_nh, "weight_curvature", weight_curvature_, 8.0);
+    loadPlannerParam(
+        planner_nh, legacy_nh, "offset_score_weight", offset_score_weight_, 1.0);
+    loadPlannerParam(
+        planner_nh, legacy_nh, "curvature_score_weight", curvature_score_weight_, 0.50);
+    loadPlannerParam(
+        planner_nh, legacy_nh, "clearance_score_weight", clearance_score_weight_, 0.50);
+    loadPlannerParam(planner_nh, legacy_nh, "side_change_penalty", side_change_penalty_, 2.0);
+    loadPlannerParam(
+        planner_nh, legacy_nh, "obstacle_trigger_cycles", obstacle_trigger_cycles_, 2);
+    loadPlannerParam(planner_nh, legacy_nh, "side_lock_time", side_lock_time_, 1.0);
+    loadPlannerParam(planner_nh, legacy_nh, "clear_hold_time", clear_hold_time_, 0.5);
+    loadPlannerParam(planner_nh, legacy_nh, "return_time", return_time_, 0.80);
+
+    planning_horizon_ = std::max(0.50, planning_horizon_);
+    collision_horizon_ = clampValue(collision_horizon_, 0.10, planning_horizon_);
+    path_resolution_ = std::max(0.01, path_resolution_);
+    collision_check_step_ = std::max(0.002, collision_check_step_);
+    collision_check_step_ = std::min(
+        collision_check_step_,
+        std::max(0.002, 0.5 * costmap_ros_->getCostmap()->getResolution()));
+    collision_yaw_step_ = clampValue(collision_yaw_step_, 0.01, 0.35);
+    transform_timeout_ = clampValue(transform_timeout_, 0.01, 1.0);
+
+    lookahead_min_ = std::max(path_resolution_, lookahead_min_);
+    lookahead_max_ = std::max(lookahead_min_, lookahead_max_);
+    lookahead_time_ = std::max(0.0, lookahead_time_);
+
+    max_vel_x_ = std::max(0.0, max_vel_x_);
+    max_vel_theta_ = std::max(0.0, max_vel_theta_);
+    acc_lim_x_ = std::max(0.01, acc_lim_x_);
+    dec_lim_x_ = std::max(0.01, dec_lim_x_);
+    acc_lim_theta_ = std::max(0.01, acc_lim_theta_);
+    dec_lim_theta_ = std::max(0.01, dec_lim_theta_);
+    max_lateral_acceleration_ = std::max(0.01, max_lateral_acceleration_);
+
+    final_xy_tolerance_ = std::max(0.01, final_xy_tolerance_);
+    final_yaw_tolerance_ = clampValue(final_yaw_tolerance_, 0.01, M_PI);
+    final_yaw_gain_ = std::max(0.0, final_yaw_gain_);
+    final_yaw_max_vel_ = std::max(0.0, final_yaw_max_vel_);
+    no_path_grace_time_ = std::max(0.0, no_path_grace_time_);
+    no_path_timeout_ = std::max(no_path_grace_time_, no_path_timeout_);
+    carry_speed_scale_ = clampValue(carry_speed_scale_, 0.05, 1.0);
+
+    offset_step_ = clampValue(offset_step_, 0.01, 0.25);
+    max_lateral_offset_ = std::max(offset_step_, max_lateral_offset_);
+    shift_in_distance_ = std::max(0.0, shift_in_distance_);
+    shift_out_distance_ = std::max(0.05, shift_out_distance_);
+    obstacle_pass_margin_ = std::max(0.0, obstacle_pass_margin_);
+    desired_clearance_ = std::max(0.0, desired_clearance_);
+    hard_clearance_ = clampValue(hard_clearance_, 0.0, desired_clearance_);
+    distance_gradient_step_ = std::max(0.01, distance_gradient_step_);
+    distance_field_update_period_ = std::max(0.02, distance_field_update_period_);
+    optimization_iterations_ = std::max(0, optimization_iterations_);
+    optimization_step_ = clampValue(optimization_step_, 0.001, 0.50);
+    weight_reference_ = std::max(0.0, weight_reference_);
+    weight_smooth_ = std::max(0.0, weight_smooth_);
+    weight_obstacle_ = std::max(0.0, weight_obstacle_);
+    weight_temporal_ = std::max(0.0, weight_temporal_);
+    weight_curvature_ = std::max(0.0, weight_curvature_);
+    offset_score_weight_ = std::max(0.0, offset_score_weight_);
+    curvature_score_weight_ = std::max(0.0, curvature_score_weight_);
+    clearance_score_weight_ = std::max(0.0, clearance_score_weight_);
+    side_change_penalty_ = std::max(0.0, side_change_penalty_);
+    obstacle_trigger_cycles_ = std::max(1, obstacle_trigger_cycles_);
+    side_lock_time_ = std::max(0.0, side_lock_time_);
+    clear_hold_time_ = std::max(0.0, clear_hold_time_);
+    return_time_ = std::max(0.05, return_time_);
+
+    ros::NodeHandle public_nh;
+    carry_mode_sub_ = public_nh.subscribe(
+        "/sim_task3/carry_mode", 1, &CymPlanner::carryModeCallback, this);
+
+    ros::NodeHandle debug_nh("/cym_planner");
+    reference_path_pub_ = debug_nh.advertise<nav_msgs::Path>("reference_path", 1);
+    left_seed_path_pub_ = debug_nh.advertise<nav_msgs::Path>("left_seed_path", 1);
+    right_seed_path_pub_ = debug_nh.advertise<nav_msgs::Path>("right_seed_path", 1);
+    selected_path_pub_ = debug_nh.advertise<nav_msgs::Path>("selected_path", 1);
+    collision_footprints_pub_ =
+        debug_nh.advertise<visualization_msgs::MarkerArray>("predicted_footprints", 1);
+    planner_state_pub_ = debug_nh.advertise<std_msgs::String>("planner_state", 1, true);
+
+    previous_cmd_ = geometry_msgs::Twist();
+    previous_control_time_ = ros::Time(0);
+    distance_field_time_ = ros::Time(0);
+    no_path_since_ = ros::Time(0);
+    state_enter_time_ = ros::Time::now();
+    path_clear_since_ = ros::Time(0);
+    state_ = PlannerState::TRACK;
+    initialized_ = true;
+
+    ROS_INFO(
+        "cym_planner initialized | frame=%s footprint radii=%.3f/%.3f | horizon=%.2f/%.2f | "
+        "resolution=%.3f collision_step=%.3f | lookahead=%.2f..%.2f | max_v/w=%.2f/%.2f",
+        local_frame_.c_str(),
+        inscribed_radius_,
+        circumscribed_radius_,
+        planning_horizon_,
+        collision_horizon_,
+        path_resolution_,
+        collision_check_step_,
+        lookahead_min_,
+        lookahead_max_,
+        max_vel_x_,
+        max_vel_theta_);
+}
+
+void CymPlanner::carryModeCallback(const std_msgs::Bool::ConstPtr& message)
+{
+    if (carry_mode_ == message->data)
     {
-        target_index_ = 0;
-        global_plan_ = plan;
-        pose_adjusting_ = false;
-        goal_reached_ = false;
-        linear_derivative_initialized_ = false;
+        return;
+    }
+    carry_mode_ = message->data;
+    ROS_INFO(
+        "cym_planner carry mode %s; speed scale %.2f",
+        carry_mode_ ? "enabled" : "disabled",
+        carry_mode_ ? carry_speed_scale_ : 1.0);
+}
+
+bool CymPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& plan)
+{
+    if (!initialized_)
+    {
+        ROS_ERROR("cym_planner: setPlan called before initialize");
+        return false;
+    }
+
+    global_plan_ = plan;
+    selected_local_path_.clear();
+    last_collision_poses_.clear();
+    last_left_candidate_.clear();
+    last_right_candidate_.clear();
+    previous_offsets_.clear();
+    nearest_global_index_ = 0;
+    locked_side_ = 0;
+    blocked_cycles_ = 0;
+    state_ = PlannerState::TRACK;
+    state_enter_time_ = ros::Time::now();
+    path_clear_since_ = ros::Time(0);
+    no_path_since_ = ros::Time(0);
+    return_scale_ = 1.0;
+    goal_reached_ = false;
+    return !global_plan_.empty();
+}
+
+bool CymPlanner::transformPose(
+    const geometry_msgs::PoseStamped& input,
+    const std::string& target_frame,
+    geometry_msgs::PoseStamped& output) const
+{
+    if (tf_buffer_ == nullptr || target_frame.empty() || input.header.frame_id.empty())
+    {
+        return false;
+    }
+
+    if (input.header.frame_id == target_frame)
+    {
+        output = input;
+        output.header.stamp = ros::Time::now();
         return true;
     }
-    bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
+
+    geometry_msgs::PoseStamped source = input;
+    source.header.stamp = ros::Time(0);
+    try
     {
-        if(global_plan_.empty())
+        tf_buffer_->transform(
+            source, output, target_frame, ros::Duration(transform_timeout_));
+        return true;
+    }
+    catch (const tf2::TransformException& exception)
+    {
+        ROS_WARN_THROTTLE(
+            1.0,
+            "cym_planner: cannot transform pose from %s to %s: %s",
+            input.header.frame_id.c_str(),
+            target_frame.c_str(),
+            exception.what());
+        return false;
+    }
+}
+
+int CymPlanner::findNearestGlobalIndex(
+    const geometry_msgs::PoseStamped& robot_pose)
+{
+    if (global_plan_.empty())
+    {
+        return -1;
+    }
+
+    geometry_msgs::PoseStamped robot_in_plan_frame;
+    if (!transformPose(
+            robot_pose,
+            global_plan_.front().header.frame_id,
+            robot_in_plan_frame))
+    {
+        return -1;
+    }
+
+    const int plan_size = static_cast<int>(global_plan_.size());
+    const int begin = std::max(0, std::min(nearest_global_index_, plan_size - 1) - 20);
+    const int end = std::min(plan_size, begin + 220);
+
+    double best_distance = std::numeric_limits<double>::infinity();
+    int best_index = begin;
+    for (int index = begin; index < end; ++index)
+    {
+        const double dx =
+            global_plan_[index].pose.position.x - robot_in_plan_frame.pose.position.x;
+        const double dy =
+            global_plan_[index].pose.position.y - robot_in_plan_frame.pose.position.y;
+        const double distance = std::hypot(dx, dy);
+        if (distance < best_distance)
         {
-            cmd_vel = geometry_msgs::Twist();
+            best_distance = distance;
+            best_index = index;
+        }
+    }
+
+    nearest_global_index_ = best_index;
+    return best_index;
+}
+
+bool CymPlanner::cropGlobalPlan(
+    int start_index,
+    double horizon,
+    std::vector<PathPoint>& cropped_path) const
+{
+    cropped_path.clear();
+    if (start_index < 0 || start_index >= static_cast<int>(global_plan_.size()))
+    {
+        return false;
+    }
+
+    double accumulated = 0.0;
+    for (int index = start_index;
+         index < static_cast<int>(global_plan_.size());
+         ++index)
+    {
+        geometry_msgs::PoseStamped local_pose;
+        if (!transformPose(global_plan_[index], local_frame_, local_pose))
+        {
             return false;
         }
 
-        //get costmap
-        costmap_2d::Costmap2D* costmap = costmap_ros_->getCostmap();
-        unsigned char* map_data = costmap->getCharMap();
-        unsigned int size_x = costmap->getSizeInCellsX();
-        unsigned int size_y = costmap->getSizeInCellsY();
+        PathPoint point;
+        point.x = local_pose.pose.position.x;
+        point.y = local_pose.pose.position.y;
+        point.yaw = tf2::getYaw(local_pose.pose.orientation);
 
-        cv::Mat map_image(size_y, size_x, CV_8UC3, cv::Scalar(128, 128, 128));
-        
-        for(unsigned int y = 0; y < size_y; y++)
+        if (!cropped_path.empty())
         {
-            for(unsigned int x = 0; x < size_x; x++)
+            const double segment_length = std::hypot(
+                point.x - cropped_path.back().x,
+                point.y - cropped_path.back().y);
+            if (segment_length < 1e-4)
             {
-                int map_index = y * size_x + x;
-                unsigned char cost = map_data[map_index];
-                cv::Vec3b& pixel = map_image.at<cv::Vec3b>(y, x);
-                if(cost == 0)
+                continue;
+            }
+            accumulated += segment_length;
+        }
+
+        point.s = accumulated;
+        cropped_path.push_back(point);
+        if (accumulated >= horizon)
+        {
+            break;
+        }
+    }
+    return !cropped_path.empty();
+}
+
+std::vector<CymPlanner::PathPoint> CymPlanner::resamplePath(
+    const std::vector<PathPoint>& path,
+    double resolution) const
+{
+    if (path.size() < 2 || path.back().s <= kEpsilon)
+    {
+        return path;
+    }
+
+    std::vector<PathPoint> sampled;
+    sampled.reserve(
+        static_cast<std::size_t>(std::ceil(path.back().s / resolution)) + 2U);
+
+    std::size_t segment = 0;
+    for (double sample_s = 0.0;
+         sample_s < path.back().s;
+         sample_s += resolution)
+    {
+        while (segment + 1 < path.size() && path[segment + 1].s < sample_s)
+        {
+            ++segment;
+        }
+        if (segment + 1 >= path.size())
+        {
+            break;
+        }
+
+        const PathPoint& first = path[segment];
+        const PathPoint& second = path[segment + 1];
+        const double segment_length = second.s - first.s;
+        const double ratio = segment_length > kEpsilon
+            ? clampValue((sample_s - first.s) / segment_length, 0.0, 1.0)
+            : 0.0;
+
+        PathPoint point;
+        point.x = first.x + ratio * (second.x - first.x);
+        point.y = first.y + ratio * (second.y - first.y);
+        point.yaw = angles::normalize_angle(
+            first.yaw + ratio * angles::shortest_angular_distance(first.yaw, second.yaw));
+        point.s = sample_s;
+        sampled.push_back(point);
+    }
+
+    if (sampled.empty() ||
+        std::hypot(
+            sampled.back().x - path.back().x,
+            sampled.back().y - path.back().y) > 1e-4)
+    {
+        sampled.push_back(path.back());
+    }
+
+    computePathGeometry(sampled);
+    return sampled;
+}
+
+void CymPlanner::computePathGeometry(std::vector<PathPoint>& path) const
+{
+    if (path.empty())
+    {
+        return;
+    }
+
+    path.front().s = 0.0;
+    for (std::size_t index = 1; index < path.size(); ++index)
+    {
+        path[index].s = path[index - 1].s + std::hypot(
+            path[index].x - path[index - 1].x,
+            path[index].y - path[index - 1].y);
+    }
+
+    if (path.size() == 1)
+    {
+        path.front().curvature = 0.0;
+        return;
+    }
+
+    for (std::size_t index = 0; index < path.size(); ++index)
+    {
+        const std::size_t previous = index == 0 ? 0 : index - 1;
+        const std::size_t next = std::min(index + 1, path.size() - 1);
+        path[index].yaw = std::atan2(
+            path[next].y - path[previous].y,
+            path[next].x - path[previous].x);
+    }
+
+    path.front().curvature = 0.0;
+    path.back().curvature = 0.0;
+    for (std::size_t index = 1; index + 1 < path.size(); ++index)
+    {
+        const double distance = path[index + 1].s - path[index - 1].s;
+        path[index].curvature = distance > kEpsilon
+            ? angles::shortest_angular_distance(
+                  path[index - 1].yaw, path[index + 1].yaw) / distance
+            : 0.0;
+    }
+    if (path.size() > 2)
+    {
+        path.front().curvature = path[1].curvature;
+        path.back().curvature = path[path.size() - 2].curvature;
+    }
+}
+
+bool CymPlanner::checkPoseCollision(double x, double y, double yaw) const
+{
+    if (costmap_ros_ == nullptr || world_model_ == nullptr)
+    {
+        return true;
+    }
+
+    unsigned int map_x = 0;
+    unsigned int map_y = 0;
+    costmap_2d::Costmap2D* costmap = costmap_ros_->getCostmap();
+    if (!costmap->worldToMap(x, y, map_x, map_y))
+    {
+        return true;
+    }
+    if (costmap->getCost(map_x, map_y) >= costmap_2d::LETHAL_OBSTACLE)
+    {
+        return true;
+    }
+
+    const double footprint_cost = world_model_->footprintCost(
+        x,
+        y,
+        yaw,
+        footprint_,
+        inscribed_radius_,
+        circumscribed_radius_);
+    return footprint_cost < 0.0;
+}
+
+CymPlanner::CollisionResult CymPlanner::evaluatePathCollision(
+    const std::vector<PathPoint>& path,
+    double horizon)
+{
+    CollisionResult result;
+    last_collision_poses_.clear();
+    if (path.size() < 2)
+    {
+        result.collision = true;
+        return result;
+    }
+
+    for (std::size_t index = 0; index + 1 < path.size(); ++index)
+    {
+        if (path[index].s > horizon)
+        {
+            break;
+        }
+
+        const double dx = path[index + 1].x - path[index].x;
+        const double dy = path[index + 1].y - path[index].y;
+        const double distance = std::hypot(dx, dy);
+        const double dyaw = angles::shortest_angular_distance(
+            path[index].yaw, path[index + 1].yaw);
+
+        const int translation_steps = static_cast<int>(
+            std::ceil(distance / collision_check_step_));
+        const int rotation_steps = static_cast<int>(
+            std::ceil(std::abs(dyaw) / collision_yaw_step_));
+        const int steps = std::max(1, std::max(translation_steps, rotation_steps));
+
+        for (int step = 0; step <= steps; ++step)
+        {
+            const double ratio = static_cast<double>(step) / static_cast<double>(steps);
+            const double sample_s = path[index].s + ratio * distance;
+            if (sample_s > horizon + collision_check_step_)
+            {
+                break;
+            }
+
+            PathPoint sample;
+            sample.x = path[index].x + ratio * dx;
+            sample.y = path[index].y + ratio * dy;
+            sample.yaw = angles::normalize_angle(path[index].yaw + ratio * dyaw);
+            sample.s = sample_s;
+
+            if (!checkPoseCollision(sample.x, sample.y, sample.yaw))
+            {
+                continue;
+            }
+
+            if (!result.collision)
+            {
+                result.collision = true;
+                result.first_collision_index = static_cast<int>(index);
+                result.first_collision_distance = sample_s;
+            }
+            result.last_collision_index = static_cast<int>(index);
+
+            if (last_collision_poses_.empty() ||
+                std::hypot(
+                    sample.x - last_collision_poses_.back().x,
+                    sample.y - last_collision_poses_.back().y) >= 0.05 ||
+                std::abs(angles::shortest_angular_distance(
+                    sample.yaw, last_collision_poses_.back().yaw)) >= 0.10)
+            {
+                last_collision_poses_.push_back(sample);
+            }
+        }
+    }
+    return result;
+}
+
+double CymPlanner::smoothStep5(double value) const
+{
+    const double u = clampValue(value, 0.0, 1.0);
+    return 10.0 * std::pow(u, 3) - 15.0 * std::pow(u, 4) + 6.0 * std::pow(u, 5);
+}
+
+double CymPlanner::computeSeedOffset(
+    double path_s,
+    double collision_start,
+    double collision_end,
+    int side,
+    double peak_offset,
+    double path_end) const
+{
+    if (side == 0 || peak_offset <= 0.0 || collision_end < collision_start)
+    {
+        return 0.0;
+    }
+
+    const double shift_start = std::max(0.0, collision_start - shift_in_distance_);
+    const double hold_end = collision_end + obstacle_pass_margin_;
+    const double return_end = hold_end + shift_out_distance_;
+    const double sign = side > 0 ? 1.0 : -1.0;
+
+    if (path_s <= shift_start)
+    {
+        return 0.0;
+    }
+    if (path_s < collision_start && collision_start > shift_start + kEpsilon)
+    {
+        return sign * peak_offset * smoothStep5(
+            (path_s - shift_start) / (collision_start - shift_start));
+    }
+    if (path_s <= hold_end)
+    {
+        return sign * peak_offset;
+    }
+    if (return_end <= path_end + kEpsilon && path_s < return_end)
+    {
+        return sign * peak_offset * (1.0 - smoothStep5(
+            (path_s - hold_end) / (return_end - hold_end)));
+    }
+    if (return_end > path_end + kEpsilon)
+    {
+        return sign * peak_offset;
+    }
+    return 0.0;
+}
+
+CymPlanner::CandidatePath CymPlanner::generatePathFromOffsets(
+    const std::vector<PathPoint>& reference,
+    const std::vector<double>& offsets,
+    int side) const
+{
+    CandidatePath candidate;
+    candidate.side = side;
+    candidate.points = reference;
+    if (reference.empty())
+    {
+        return candidate;
+    }
+
+    double peak_offset = 0.0;
+    for (std::size_t index = 0; index < reference.size(); ++index)
+    {
+        double offset = index < offsets.size() ? offsets[index] : 0.0;
+        if (side > 0)
+        {
+            offset = std::max(0.0, offset);
+        }
+        else if (side < 0)
+        {
+            offset = std::min(0.0, offset);
+        }
+        offset = clampValue(offset, -max_lateral_offset_, max_lateral_offset_);
+
+        const double nx = -std::sin(reference[index].yaw);
+        const double ny = std::cos(reference[index].yaw);
+        candidate.points[index].x = reference[index].x + offset * nx;
+        candidate.points[index].y = reference[index].y + offset * ny;
+        candidate.points[index].offset = offset;
+        peak_offset = std::max(peak_offset, std::abs(offset));
+    }
+
+    const double first_yaw = reference.front().yaw;
+    computePathGeometry(candidate.points);
+    candidate.points.front().yaw = first_yaw;
+    candidate.peak_offset = peak_offset;
+    candidate.minimum_clearance = std::numeric_limits<double>::infinity();
+    for (const PathPoint& point : candidate.points)
+    {
+        candidate.minimum_clearance = std::min(
+            candidate.minimum_clearance,
+            getObstacleDistance(point.x, point.y));
+    }
+    return candidate;
+}
+
+CymPlanner::CandidatePath CymPlanner::generateSeedCandidate(
+    const std::vector<PathPoint>& reference,
+    const CollisionResult& collision,
+    int side,
+    double peak_offset) const
+{
+    CandidatePath candidate;
+    candidate.side = side;
+    if (reference.empty() || !collision.collision || side == 0)
+    {
+        return candidate;
+    }
+
+    const double collision_start = collision.first_collision_distance;
+    const int last_index = std::max(
+        0,
+        std::min(
+            collision.last_collision_index,
+            static_cast<int>(reference.size()) - 1));
+    const double collision_end = std::max(
+        collision_start,
+        reference[static_cast<std::size_t>(last_index)].s);
+
+    std::vector<double> offsets(reference.size(), 0.0);
+    for (std::size_t index = 0; index < reference.size(); ++index)
+    {
+        offsets[index] = computeSeedOffset(
+            reference[index].s,
+            collision_start,
+            collision_end,
+            side,
+            peak_offset,
+            reference.back().s);
+    }
+    return generatePathFromOffsets(reference, offsets, side);
+}
+
+CymPlanner::CandidatePath CymPlanner::findFirstFeasibleCandidate(
+    const std::vector<PathPoint>& reference,
+    const CollisionResult& collision,
+    int side)
+{
+    CandidatePath best;
+    if (!collision.collision || side == 0)
+    {
+        return best;
+    }
+
+    for (double magnitude = offset_step_;
+         magnitude <= max_lateral_offset_ + kEpsilon;
+         magnitude += offset_step_)
+    {
+        CandidatePath candidate = generateSeedCandidate(
+            reference, collision, side, std::min(magnitude, max_lateral_offset_));
+        const CollisionResult candidate_collision =
+            evaluatePathCollision(candidate.points, planning_horizon_);
+        if (candidate_collision.collision)
+        {
+            continue;
+        }
+
+        candidate.valid = true;
+        candidate.score = scoreCandidate(candidate);
+        return candidate;
+    }
+    return best;
+}
+
+double CymPlanner::sampleCost(double x, double y) const
+{
+    if (costmap_ros_ == nullptr)
+    {
+        return 255.0;
+    }
+    unsigned int map_x = 0;
+    unsigned int map_y = 0;
+    costmap_2d::Costmap2D* costmap = costmap_ros_->getCostmap();
+    if (!costmap->worldToMap(x, y, map_x, map_y))
+    {
+        return 255.0;
+    }
+    return static_cast<double>(costmap->getCost(map_x, map_y));
+}
+
+void CymPlanner::rebuildDistanceField()
+{
+    if (costmap_ros_ == nullptr || costmap_ros_->getCostmap() == nullptr)
+    {
+        obstacle_distance_field_.clear();
+        distance_field_width_ = 0;
+        distance_field_height_ = 0;
+        return;
+    }
+
+    costmap_2d::Costmap2D* costmap = costmap_ros_->getCostmap();
+    distance_field_width_ = costmap->getSizeInCellsX();
+    distance_field_height_ = costmap->getSizeInCellsY();
+    distance_field_resolution_ = costmap->getResolution();
+    const std::size_t cell_count = static_cast<std::size_t>(
+        distance_field_width_) * static_cast<std::size_t>(distance_field_height_);
+    obstacle_distance_field_.assign(
+        cell_count, std::numeric_limits<double>::infinity());
+
+    using QueueEntry = std::pair<double, std::size_t>;
+    std::priority_queue<
+        QueueEntry,
+        std::vector<QueueEntry>,
+        std::greater<QueueEntry>> queue;
+
+    for (unsigned int y = 0; y < distance_field_height_; ++y)
+    {
+        for (unsigned int x = 0; x < distance_field_width_; ++x)
+        {
+            const std::size_t index = static_cast<std::size_t>(y) *
+                distance_field_width_ + x;
+            if (costmap->getCost(x, y) >= costmap_2d::LETHAL_OBSTACLE)
+            {
+                obstacle_distance_field_[index] = 0.0;
+                queue.emplace(0.0, index);
+            }
+        }
+    }
+
+    static const int directions[8][2] = {
+        {-1, 0}, {1, 0}, {0, -1}, {0, 1},
+        {-1, -1}, {-1, 1}, {1, -1}, {1, 1}};
+    while (!queue.empty())
+    {
+        const QueueEntry current = queue.top();
+        queue.pop();
+        if (current.first > obstacle_distance_field_[current.second] + kEpsilon)
+        {
+            continue;
+        }
+
+        const unsigned int x = static_cast<unsigned int>(
+            current.second % distance_field_width_);
+        const unsigned int y = static_cast<unsigned int>(
+            current.second / distance_field_width_);
+        for (const auto& direction : directions)
+        {
+            const int neighbor_x = static_cast<int>(x) + direction[0];
+            const int neighbor_y = static_cast<int>(y) + direction[1];
+            if (neighbor_x < 0 || neighbor_y < 0 ||
+                neighbor_x >= static_cast<int>(distance_field_width_) ||
+                neighbor_y >= static_cast<int>(distance_field_height_))
+            {
+                continue;
+            }
+
+            const std::size_t neighbor_index = static_cast<std::size_t>(neighbor_y) *
+                distance_field_width_ + static_cast<unsigned int>(neighbor_x);
+            const double step_distance = distance_field_resolution_ *
+                ((direction[0] != 0 && direction[1] != 0) ? std::sqrt(2.0) : 1.0);
+            const double candidate_distance = current.first + step_distance;
+            if (candidate_distance + kEpsilon < obstacle_distance_field_[neighbor_index])
+            {
+                obstacle_distance_field_[neighbor_index] = candidate_distance;
+                queue.emplace(candidate_distance, neighbor_index);
+            }
+        }
+    }
+}
+
+double CymPlanner::getObstacleDistance(double x, double y) const
+{
+    if (costmap_ros_ == nullptr || obstacle_distance_field_.empty())
+    {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    unsigned int map_x = 0;
+    unsigned int map_y = 0;
+    if (!costmap_ros_->getCostmap()->worldToMap(x, y, map_x, map_y))
+    {
+        return 0.0;
+    }
+    const std::size_t index = static_cast<std::size_t>(map_y) *
+        distance_field_width_ + map_x;
+    if (index >= obstacle_distance_field_.size())
+    {
+        return 0.0;
+    }
+    return obstacle_distance_field_[index];
+}
+
+double CymPlanner::computeLateralObstacleForce(
+    const PathPoint& reference,
+    double offset) const
+{
+    const double nx = -std::sin(reference.yaw);
+    const double ny = std::cos(reference.yaw);
+    const double x = reference.x + offset * nx;
+    const double y = reference.y + offset * ny;
+
+    const double left_distance = getObstacleDistance(
+        x + distance_gradient_step_ * nx,
+        y + distance_gradient_step_ * ny);
+    const double right_distance = getObstacleDistance(
+        x - distance_gradient_step_ * nx,
+        y - distance_gradient_step_ * ny);
+    const double current_distance = getObstacleDistance(x, y);
+
+    if (!std::isfinite(left_distance) && !std::isfinite(right_distance))
+    {
+        return 0.0;
+    }
+
+    const double safe_left = std::isfinite(left_distance)
+        ? left_distance
+        : desired_clearance_ * 2.0;
+    const double safe_right = std::isfinite(right_distance)
+        ? right_distance
+        : desired_clearance_ * 2.0;
+    double gradient = (safe_left - safe_right) /
+        std::max(2.0 * distance_gradient_step_, kEpsilon);
+    if (current_distance < desired_clearance_)
+    {
+        gradient *= desired_clearance_ - current_distance;
+    }
+    if (current_distance < hard_clearance_)
+    {
+        gradient *= 2.0;
+    }
+    return clampValue(gradient, -1.0, 1.0);
+}
+
+void CymPlanner::refineOffsets(
+    const std::vector<PathPoint>& reference,
+    std::vector<double>& offsets,
+    int locked_side) const
+{
+    if (reference.size() < 5 || offsets.size() != reference.size())
+    {
+        return;
+    }
+
+    std::vector<double> next = offsets;
+    for (int iteration = 0; iteration < optimization_iterations_; ++iteration)
+    {
+        for (std::size_t index = 2; index + 2 < offsets.size(); ++index)
+        {
+            const double smooth_force =
+                offsets[index - 1] + offsets[index + 1] - 2.0 * offsets[index];
+            const double reference_force = -offsets[index];
+            const double previous_offset = index < previous_offsets_.size()
+                ? previous_offsets_[index]
+                : offsets[index];
+            const double temporal_force = previous_offset - offsets[index];
+            const double obstacle_force = computeLateralObstacleForce(
+                reference[index], offsets[index]);
+
+            double update =
+                weight_smooth_ * smooth_force +
+                weight_reference_ * reference_force +
+                weight_temporal_ * temporal_force +
+                weight_obstacle_ * obstacle_force;
+
+            // Curvature is evaluated after rebuilding the path.  This local
+            // first-order term keeps large changes from accumulating.
+            update -= weight_curvature_ *
+                (offsets[index] - 0.5 * (offsets[index - 1] + offsets[index + 1]));
+
+            next[index] = clampValue(
+                offsets[index] + optimization_step_ * update,
+                -max_lateral_offset_,
+                max_lateral_offset_);
+            if (locked_side > 0)
+            {
+                next[index] = std::max(0.0, next[index]);
+            }
+            else if (locked_side < 0)
+            {
+                next[index] = std::min(0.0, next[index]);
+            }
+        }
+        next.front() = 0.0;
+        next.back() = 0.0;
+        offsets.swap(next);
+    }
+}
+
+double CymPlanner::scoreCandidate(const CandidatePath& candidate) const
+{
+    if (!candidate.valid || candidate.points.empty())
+    {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    double score = offset_score_weight_ * std::abs(candidate.peak_offset);
+    if (std::isfinite(candidate.minimum_clearance))
+    {
+        score += clearance_score_weight_ /
+            std::max(candidate.minimum_clearance, 0.01);
+    }
+    for (std::size_t index = 1; index < candidate.points.size(); ++index)
+    {
+        const double curvature = candidate.points[index].curvature;
+        score += curvature_score_weight_ * curvature * curvature;
+        if (index < previous_offsets_.size())
+        {
+            score += weight_temporal_ * std::abs(
+                candidate.points[index].offset - previous_offsets_[index]);
+        }
+    }
+    if (locked_side_ != 0 && candidate.side != locked_side_)
+    {
+        score += side_change_penalty_;
+    }
+    return score;
+}
+
+CymPlanner::CandidatePath CymPlanner::generateReturnCandidate(
+    const std::vector<PathPoint>& reference,
+    int side)
+{
+    CandidatePath candidate;
+    candidate.side = side;
+    if (reference.empty() || previous_offsets_.empty())
+    {
+        candidate.points = reference;
+        candidate.valid = !reference.empty();
+        return candidate;
+    }
+
+    std::vector<double> offsets(reference.size(), 0.0);
+    for (std::size_t index = 0; index < reference.size(); ++index)
+    {
+        const double normalized = reference.size() > 1
+            ? static_cast<double>(index) / static_cast<double>(reference.size() - 1)
+            : 0.0;
+        const double old_position = normalized *
+            static_cast<double>(previous_offsets_.size() - 1);
+        const std::size_t first = static_cast<std::size_t>(old_position);
+        const std::size_t second = std::min(first + 1, previous_offsets_.size() - 1);
+        const double ratio = old_position - static_cast<double>(first);
+        offsets[index] = return_scale_ * (
+            previous_offsets_[first] + ratio *
+            (previous_offsets_[second] - previous_offsets_[first]));
+    }
+    return generatePathFromOffsets(reference, offsets, side);
+}
+
+bool CymPlanner::selectAvoidancePath(
+    const std::vector<PathPoint>& reference,
+    const CollisionResult& collision,
+    const ros::Time& now)
+{
+    last_left_candidate_.clear();
+    last_right_candidate_.clear();
+
+    CandidatePath left;
+    CandidatePath right;
+    if (locked_side_ == 0)
+    {
+        left = findFirstFeasibleCandidate(reference, collision, 1);
+        right = findFirstFeasibleCandidate(reference, collision, -1);
+    }
+    else
+    {
+        const double current_peak = previous_offsets_.empty()
+            ? offset_step_
+            : *std::max_element(
+                  previous_offsets_.begin(), previous_offsets_.end(),
+                  [](double first, double second) {
+                      return std::abs(first) < std::abs(second);
+                  });
+        CandidatePath locked_candidate = generateSeedCandidate(
+            reference,
+            collision,
+            locked_side_,
+            std::max(offset_step_, std::abs(current_peak)));
+        if (!locked_candidate.points.empty())
+        {
+            const CollisionResult locked_collision =
+                evaluatePathCollision(locked_candidate.points, planning_horizon_);
+            if (!locked_collision.collision)
+            {
+                locked_candidate.valid = true;
+                locked_candidate.score = scoreCandidate(locked_candidate);
+                if (locked_side_ > 0)
                 {
-                    pixel = cv::Vec3b(128, 128, 128);
-                }else if(cost == 253)
+                    left = locked_candidate;
+                }
+                else
                 {
-                    pixel = cv::Vec3b(255,255,0);
-                }else if(cost == 254)
-                {
-                    pixel = cv::Vec3b(0, 0, 0);
-                }else 
-                {
-                    unsigned char blue = 255 - cost;
-                    unsigned char red = 255 - cost;
-                    pixel = cv::Vec3b(blue, 0, red);
+                    right = locked_candidate;
                 }
             }
         }
-        const std::string costmap_frame = costmap_ros_->getGlobalFrameID();
-        const int check_start_index = std::max(
-            0, std::min(target_index_, static_cast<int>(global_plan_.size()) - 1));
-        double checked_distance = 0.0;
-        double previous_x = 0.0;
-        double previous_y = 0.0;
-        bool have_previous_point = false;
 
-        // Draw the plan and reject a blocked segment ahead of the robot.  Returning
-        // false intentionally delegates detour planning to move_base/global_planner.
-        for(int i = 0; i < global_plan_.size(); i++)
+        const double locked_duration = (now - state_enter_time_).toSec();
+        if (!left.valid && !right.valid && locked_duration >= side_lock_time_)
         {
-            geometry_msgs::PoseStamped pose_costmap;
-            global_plan_[i].header.stamp = ros::Time(0);
-            try
+            const int other_side = -locked_side_;
+            CandidatePath alternative = findFirstFeasibleCandidate(
+                reference, collision, other_side);
+            if (other_side > 0)
             {
-                tf_listener_->transformPose(costmap_frame, global_plan_[i], pose_costmap);
+                left = alternative;
             }
-            catch(tf::TransformException& ex)
+            else
             {
-                ROS_WARN_THROTTLE(1.0, "cym_planner: cannot transform global plan into %s: %s",
-                                  costmap_frame.c_str(), ex.what());
-                cmd_vel = geometry_msgs::Twist();
-                return false;
-            }
-
-            unsigned int x = 0;
-            unsigned int y = 0;
-            if(!costmap->worldToMap(pose_costmap.pose.position.x,
-                                    pose_costmap.pose.position.y, x, y))
-            {
-                continue;
-            }
-            cv::circle(map_image, cv::Point(x, y), 0, cv::Scalar(255, 0, 255));
-
-            if(i < check_start_index)
-            {
-                continue;
-            }
-
-            if(have_previous_point)
-            {
-                checked_distance += std::hypot(
-                    pose_costmap.pose.position.x - previous_x,
-                    pose_costmap.pose.position.y - previous_y);
-            }
-            previous_x = pose_costmap.pose.position.x;
-            previous_y = pose_costmap.pose.position.y;
-            have_previous_point = true;
-
-            if(checked_distance > obstacle_lookahead_distance_)
-            {
-                break;
-            }
-
-            cv::circle(map_image, cv::Point(x, y), 0, cv::Scalar(0, 0, 255));
-            const unsigned char cost = costmap->getCost(x, y);
-            if(cost >= obstacle_cost_threshold_)
-            {
-                ROS_WARN_THROTTLE(1.0,
-                                  "cym_planner: blocked path segment, cost=%u threshold=%d; requesting global replan",
-                                  static_cast<unsigned int>(cost), obstacle_cost_threshold_);
-                cmd_vel = geometry_msgs::Twist();
-                return false;
+                right = alternative;
             }
         }
+    }
 
+    if (!left.points.empty())
+    {
+        last_left_candidate_ = left.points;
+    }
+    if (!right.points.empty())
+    {
+        last_right_candidate_ = right.points;
+    }
 
+    CandidatePath* chosen = nullptr;
+    if (left.valid && (!right.valid || left.score <= right.score))
+    {
+        chosen = &left;
+    }
+    else if (right.valid)
+    {
+        chosen = &right;
+    }
+    if (chosen == nullptr)
+    {
+        return false;
+    }
 
+    std::vector<double> offsets;
+    offsets.reserve(chosen->points.size());
+    for (const PathPoint& point : chosen->points)
+    {
+        offsets.push_back(point.offset);
+    }
+    refineOffsets(reference, offsets, chosen->side);
+    CandidatePath optimized = generatePathFromOffsets(reference, offsets, chosen->side);
+    const CollisionResult optimized_collision =
+        evaluatePathCollision(optimized.points, planning_horizon_);
+    if (!optimized_collision.collision)
+    {
+        optimized.valid = true;
+        optimized.score = scoreCandidate(optimized);
+        chosen = &optimized;
+    }
 
+    locked_side_ = chosen->side;
+    state_ = chosen->side > 0
+        ? PlannerState::AVOID_LEFT
+        : PlannerState::AVOID_RIGHT;
+    state_enter_time_ = now;
+    return_scale_ = 1.0;
+    selected_local_path_ = chosen->points;
+    previous_offsets_.clear();
+    for (const PathPoint& point : selected_local_path_)
+    {
+        previous_offsets_.push_back(point.offset);
+    }
+    return true;
+}
 
+bool CymPlanner::selectReturnPath(
+    const std::vector<PathPoint>& reference,
+    const ros::Time& now)
+{
+    if (locked_side_ == 0)
+    {
+        selected_local_path_ = reference;
+        return true;
+    }
 
-        map_image.at<cv::Vec3b>(size_y / 2, size_x / 2) = cv::Vec3b(0, 255, 0);
+    if (path_clear_since_.isZero())
+    {
+        path_clear_since_ = now;
+        return false;
+    }
+    if ((now - path_clear_since_).toSec() < clear_hold_time_)
+    {
+        return false;
+    }
 
+    double dt = 0.05;
+    if (!previous_control_time_.isZero())
+    {
+        dt = clampValue((now - previous_control_time_).toSec(), 0.005, 0.20);
+    }
+    return_scale_ *= std::exp(-dt / return_time_);
+    CandidatePath returning = generateReturnCandidate(reference, locked_side_);
+    const CollisionResult collision = evaluatePathCollision(
+        returning.points, planning_horizon_);
+    if (collision.collision)
+    {
+        path_clear_since_ = ros::Time(0);
+        return false;
+    }
 
+    returning.valid = true;
+    selected_local_path_ = returning.points;
+    previous_offsets_.clear();
+    for (const PathPoint& point : selected_local_path_)
+    {
+        previous_offsets_.push_back(point.offset);
+    }
 
+    if (return_scale_ < 0.05)
+    {
+        locked_side_ = 0;
+        state_ = PlannerState::TRACK;
+        state_enter_time_ = now;
+        path_clear_since_ = ros::Time(0);
+        previous_offsets_.clear();
+        selected_local_path_ = reference;
+    }
+    return true;
+}
 
+bool CymPlanner::shouldEnterGoalAlign(
+    const geometry_msgs::PoseStamped& robot_pose) const
+{
+    return !global_plan_.empty() && distanceToGoal(robot_pose) <= final_xy_tolerance_;
+}
 
+bool CymPlanner::computeGoalAlignCommand(geometry_msgs::Twist& cmd_vel)
+{
+    geometry_msgs::PoseStamped goal_in_base;
+    if (!transformPose(global_plan_.back(), base_link_frame_, goal_in_base))
+    {
+        cmd_vel = geometry_msgs::Twist();
+        return false;
+    }
 
+    const double yaw_error = angles::normalize_angle(
+        tf2::getYaw(goal_in_base.pose.orientation));
+    if (std::abs(yaw_error) <= final_yaw_tolerance_)
+    {
+        goal_reached_ = true;
+        previous_cmd_ = geometry_msgs::Twist();
+        previous_control_time_ = ros::Time::now();
+        cmd_vel = geometry_msgs::Twist();
+        ROS_INFO("cym_planner: goal reached");
+        return true;
+    }
 
+    const double motion_scale = carry_mode_ ? carry_speed_scale_ : 1.0;
+    geometry_msgs::Twist target;
+    target.angular.z = clampValue(
+        final_yaw_gain_ * yaw_error,
+        -final_yaw_max_vel_ * motion_scale,
+        final_yaw_max_vel_ * motion_scale);
+    cmd_vel = applyAccelerationLimits(target, ros::Time::now());
+    return true;
+}
 
-        //return map
-        cv::Mat flipped_image(size_y, size_x, CV_8UC3, cv::Scalar(128,128,128));
-        for (unsigned int y = 0; y < size_y; ++y)
+geometry_msgs::Twist CymPlanner::computePurePursuitCommand(
+    const geometry_msgs::PoseStamped& robot_pose,
+    const std::vector<PathPoint>& path) const
+{
+    geometry_msgs::Twist command;
+    if (path.empty())
+    {
+        return command;
+    }
+
+    std::size_t nearest = 0;
+    double nearest_distance = std::numeric_limits<double>::infinity();
+    for (std::size_t index = 0; index < path.size(); ++index)
+    {
+        const double distance = std::hypot(
+            path[index].x - robot_pose.pose.position.x,
+            path[index].y - robot_pose.pose.position.y);
+        if (distance < nearest_distance)
         {
-            for (unsigned int x = 0; x < size_x; ++x)
-            {
-                cv::Vec3b& pixel = map_image.at<cv::Vec3b>(y, x);
-                flipped_image.at<cv::Vec3b>(size_y - 1 - y, size_x - 1 - x) = pixel;
-            }
+            nearest_distance = distance;
+            nearest = index;
         }
-        map_image = flipped_image;
+    }
 
-        //show costmap
-        cv::namedWindow("Map");
-        cv::resize(map_image, map_image, cv::Size(size_x*5, size_y*5),0,0,cv::INTER_NEAREST);
-        cv::resizeWindow("Map", size_x*5, size_y*5);
-        cv::imshow("Map", map_image);
-        
+    const double lookahead = clampValue(
+        lookahead_min_ + lookahead_time_ * std::abs(previous_cmd_.linear.x),
+        lookahead_min_,
+        lookahead_max_);
+    const double target_s = path[nearest].s + lookahead;
+    std::size_t target_index = nearest;
+    while (target_index + 1 < path.size() && path[target_index].s < target_s)
+    {
+        ++target_index;
+    }
 
+    const double robot_yaw = tf2::getYaw(robot_pose.pose.orientation);
+    const double dx = path[target_index].x - robot_pose.pose.position.x;
+    const double dy = path[target_index].y - robot_pose.pose.position.y;
+    const double target_x = std::cos(robot_yaw) * dx + std::sin(robot_yaw) * dy;
+    const double target_y = -std::sin(robot_yaw) * dx + std::cos(robot_yaw) * dy;
+    const double heading_error = std::atan2(target_y, target_x);
 
+    const double motion_scale = carry_mode_ ? carry_speed_scale_ : 1.0;
+    if (target_x <= 0.0 || std::abs(heading_error) > 1.10)
+    {
+        command.angular.z = clampValue(
+            2.0 * heading_error,
+            -max_vel_theta_ * motion_scale,
+            max_vel_theta_ * motion_scale);
+        return command;
+    }
 
+    const double distance_squared = std::max(
+        target_x * target_x + target_y * target_y, 1e-4);
+    const double curvature = 2.0 * target_y / distance_squared;
+    const double curve_speed = std::sqrt(
+        max_lateral_acceleration_ / std::max(std::abs(curvature), 1e-3));
+    const double remaining_goal_distance = distanceToGoal(robot_pose);
+    const double goal_speed = std::isfinite(remaining_goal_distance)
+        ? std::sqrt(std::max(0.0, 2.0 * dec_lim_x_ * remaining_goal_distance))
+        : max_vel_x_;
+    const double heading_scale = std::max(0.20, std::cos(std::abs(heading_error)));
 
+    command.linear.x = std::min(
+        max_vel_x_ * motion_scale,
+        std::min(curve_speed, goal_speed)) * heading_scale;
+    command.angular.z = clampValue(
+        command.linear.x * curvature,
+        -max_vel_theta_ * motion_scale,
+        max_vel_theta_ * motion_scale);
+    return command;
+}
 
+double CymPlanner::clampVelocityDelta(
+    double target,
+    double previous,
+    double increase_limit,
+    double decrease_limit,
+    double dt) const
+{
+    if (target > previous)
+    {
+        return std::min(target, previous + increase_limit * dt);
+    }
+    return std::max(target, previous - decrease_limit * dt);
+}
 
-        int final_index = global_plan_.size() - 1;
-        geometry_msgs::PoseStamped pose_final;
-        global_plan_[final_index].header.stamp = ros::Time(0);
-        tf_listener_->transformPose(base_link_frame_, global_plan_[final_index], pose_final);
-        if(pose_adjusting_ == false)
+geometry_msgs::Twist CymPlanner::applyAccelerationLimits(
+    const geometry_msgs::Twist& target_cmd,
+    const ros::Time& now)
+{
+    double dt = 0.05;
+    if (!previous_control_time_.isZero())
+    {
+        dt = clampValue((now - previous_control_time_).toSec(), 0.005, 0.20);
+    }
+
+    geometry_msgs::Twist limited;
+    limited.linear.x = clampVelocityDelta(
+        target_cmd.linear.x,
+        previous_cmd_.linear.x,
+        acc_lim_x_,
+        dec_lim_x_,
+        dt);
+    limited.linear.x = std::max(0.0, limited.linear.x);
+    limited.angular.z = clampVelocityDelta(
+        target_cmd.angular.z,
+        previous_cmd_.angular.z,
+        acc_lim_theta_,
+        dec_lim_theta_,
+        dt);
+
+    previous_cmd_ = limited;
+    previous_control_time_ = now;
+    return limited;
+}
+
+geometry_msgs::Twist CymPlanner::computeSafeStopCommand(const ros::Time& now)
+{
+    return applyAccelerationLimits(geometry_msgs::Twist(), now);
+}
+
+double CymPlanner::distanceToGoal(
+    const geometry_msgs::PoseStamped& robot_pose) const
+{
+    if (global_plan_.empty())
+    {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    geometry_msgs::PoseStamped goal_in_local;
+    if (!transformPose(global_plan_.back(), robot_pose.header.frame_id, goal_in_local))
+    {
+        return std::numeric_limits<double>::infinity();
+    }
+    return std::hypot(
+        goal_in_local.pose.position.x - robot_pose.pose.position.x,
+        goal_in_local.pose.position.y - robot_pose.pose.position.y);
+}
+
+bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
+{
+    cmd_vel = geometry_msgs::Twist();
+    if (!initialized_ || global_plan_.empty() || costmap_ros_ == nullptr || tf_buffer_ == nullptr)
+    {
+        return false;
+    }
+
+    geometry_msgs::PoseStamped robot_pose;
+    if (!costmap_ros_->getRobotPose(robot_pose))
+    {
+        ROS_WARN_THROTTLE(1.0, "cym_planner: cannot get robot pose");
+        return false;
+    }
+
+    if (goal_reached_)
+    {
+        return true;
+    }
+
+    if (shouldEnterGoalAlign(robot_pose))
+    {
+        state_ = PlannerState::GOAL_ALIGN;
+        no_path_since_ = ros::Time(0);
+        selected_local_path_.clear();
+        last_collision_poses_.clear();
+        last_left_candidate_.clear();
+        last_right_candidate_.clear();
+        publishDebugPaths({}, {}, ros::Time::now());
+        publishPlannerState();
+        return computeGoalAlignCommand(cmd_vel);
+    }
+
+    const int nearest_index = findNearestGlobalIndex(robot_pose);
+    std::vector<PathPoint> cropped_path;
+    if (nearest_index < 0 ||
+        !cropGlobalPlan(nearest_index, planning_horizon_, cropped_path))
+    {
+        ROS_WARN_THROTTLE(1.0, "cym_planner: cannot build a local reference path");
+        cmd_vel = computeSafeStopCommand(ros::Time::now());
+        return false;
+    }
+
+    const double robot_to_path = std::hypot(
+        cropped_path.front().x - robot_pose.pose.position.x,
+        cropped_path.front().y - robot_pose.pose.position.y);
+    if (robot_to_path > 1e-4)
+    {
+        PathPoint current_pose;
+        current_pose.x = robot_pose.pose.position.x;
+        current_pose.y = robot_pose.pose.position.y;
+        current_pose.yaw = tf2::getYaw(robot_pose.pose.orientation);
+        cropped_path.insert(cropped_path.begin(), current_pose);
+        computePathGeometry(cropped_path);
+    }
+
+    std::vector<PathPoint> reference_path = resamplePath(cropped_path, path_resolution_);
+    if (reference_path.size() < 2)
+    {
+        cmd_vel = computeSafeStopCommand(ros::Time::now());
+        return false;
+    }
+    reference_path.front().yaw = tf2::getYaw(robot_pose.pose.orientation);
+    const ros::Time now = ros::Time::now();
+    if (obstacle_distance_field_.empty() ||
+        (now - distance_field_time_).toSec() >= distance_field_update_period_)
+    {
+        rebuildDistanceField();
+        distance_field_time_ = now;
+    }
+
+    const CollisionResult collision =
+        evaluatePathCollision(reference_path, collision_horizon_);
+    const std::vector<PathPoint> reference_collision_poses = last_collision_poses_;
+    if (collision.collision)
+    {
+        if (no_path_since_.isZero())
         {
-            double dx = pose_final.pose.position.x;
-            double dy = pose_final.pose.position.y;
-            double dist = std::sqrt(dx * dx + dy * dy);
-            if(dist < 0.05)
-            {
-                pose_adjusting_ = true;
-            }
+            no_path_since_ = now;
         }
-        const double motion_scale = carry_mode_ ? carry_speed_scale_ : 1.0;
-        if(pose_adjusting_ == true)
+        path_clear_since_ = ros::Time(0);
+        ++blocked_cycles_;
+
+        bool avoidance_selected = false;
+        if (blocked_cycles_ >= obstacle_trigger_cycles_)
         {
-            double final_yaw = tf::getYaw(pose_final.pose.orientation);
-            ROS_WARN("final_yaw: %f", final_yaw);
-            cmd_vel.angular.z = std::max(
-                -final_yaw_max_vel_ * motion_scale,
-                std::min(final_yaw * final_yaw_gain_ * motion_scale,
-                         final_yaw_max_vel_ * motion_scale));
-            cmd_vel.linear.x = pose_final.pose.position.x * final_linear_x_gain_ * motion_scale;
-            if(abs(final_yaw) < final_yaw_tolerance_)
-            {
-                goal_reached_ = true;
-                cmd_vel.angular.z = 0;
-                cmd_vel.linear.x = 0;
-                ROS_WARN("Goal Reached!");
-            }
+            avoidance_selected = selectAvoidancePath(reference_path, collision, now);
+            last_collision_poses_ = reference_collision_poses;
+        }
+
+        if (avoidance_selected)
+        {
+            no_path_since_ = ros::Time(0);
+            publishDebugPaths(reference_path, selected_local_path_, now);
+            publishPlannerState();
+            const geometry_msgs::Twist target_command =
+                computePurePursuitCommand(robot_pose, selected_local_path_);
+            cmd_vel = applyAccelerationLimits(target_command, now);
             return true;
         }
 
+        state_ = PlannerState::STOPPING;
+        selected_local_path_.clear();
+        publishDebugPaths(reference_path, selected_local_path_, now);
+        publishPlannerState();
+        cmd_vel = computeSafeStopCommand(now);
 
-
-
-
-
-
-
-
-        geometry_msgs::PoseStamped target_pose;
-        for(int i = target_index_; i < global_plan_.size(); i++)
+        const double blocked_duration = (now - no_path_since_).toSec();
+        ROS_WARN_THROTTLE(
+            1.0,
+            "cym_planner: no safe swept-footprint candidate at %.2f m; braking "
+            "(blocked %.2f s, cycles %d)",
+            collision.first_collision_distance,
+            blocked_duration,
+            blocked_cycles_);
+        if (blocked_duration > no_path_timeout_)
         {
-            geometry_msgs::PoseStamped pose_base;
-            global_plan_[i].header.stamp = ros::Time(0);
-            tf_listener_->transformPose(base_link_frame_, global_plan_[i], pose_base);
-            double dx = pose_base.pose.position.x;
-            double dy = pose_base.pose.position.y;
-            double dist = std::sqrt(dx * dx + dy * dy);
-            if(dist > 0.2)
-            {
-                target_pose = pose_base;
-                target_index_ = i;
-                ROS_WARN("target_index_: %d", target_index_);
-                break;
-            }
-            if (i == global_plan_.size() - 1)
-            {
-                target_pose = pose_base;
-            }
+            cmd_vel = geometry_msgs::Twist();
+            previous_cmd_ = cmd_vel;
+            return false;
         }
-        const double heading_error = std::atan2(
-            target_pose.pose.position.y, target_pose.pose.position.x);
-        cmd_vel.linear.y = 0.0;
-        cmd_vel.angular.z = std::max(
-            -max_vel_theta_ * motion_scale,
-            std::min(heading_error * angular_gain_ * motion_scale,
-                     max_vel_theta_ * motion_scale));
-        const double heading_speed_scale = std::max(
-            0.25, std::cos(std::min(std::abs(heading_error), 1.57079632679)));
-        const double linear_error = target_pose.pose.position.x;
-        const ros::Time control_time = ros::Time::now();
-        double linear_error_derivative = 0.0;
-        if(linear_derivative_initialized_)
-        {
-            const double control_period = (control_time - previous_control_time_).toSec();
-            if(control_period > 1e-3)
-            {
-                linear_error_derivative = std::max(
-                    -2.0,
-                    std::min((linear_error - previous_linear_error_) / control_period, 2.0));
-            }
-        }
-        previous_linear_error_ = linear_error;
-        previous_control_time_ = control_time;
-        linear_derivative_initialized_ = true;
-        const double linear_control =
-            (linear_error * linear_x_gain_ + linear_error_derivative * linear_x_kd_)
-            * motion_scale;
-        cmd_vel.linear.x = std::max(
-            0.0,
-            std::min(linear_control, max_vel_x_ * motion_scale)
-                * heading_speed_scale);
-        global_plan_[target_index_].header.stamp = ros::Time(0);
-        tf_listener_->transformPose(base_link_frame_, global_plan_[target_index_], target_pose);
-        double target_x = target_pose.pose.position.x;
-        double target_y = target_pose.pose.position.y;
-        double dist = std::sqrt(target_x * target_x + target_y * target_y);
-
-
-
-
-        cv::Mat plane_image(600, 600, CV_8UC3, cv::Scalar(0, 0, 0));
-        for(int i = 0; i < global_plan_.size(); i++)
-        {
-            geometry_msgs::PoseStamped pose_base;
-            global_plan_[i].header.stamp = ros::Time(0);
-            tf_listener_->transformPose(base_link_frame_, global_plan_[i], pose_base);
-            int cv_x = 300 - pose_base.pose.position.x * 100;
-            int cv_y = 300 - pose_base.pose.position.y * 100;
-            cv::circle(plane_image, cv::Point(cv_x, cv_y), 1, cv::Scalar(255, 0, 255));
-        }
-        cv::circle(plane_image, cv::Point(300, 300), 15, cv::Scalar(0, 255, 0));
-        cv::line(plane_image, cv::Point(65, 300), cv::Point(510, 300), cv::Scalar(0, 255, 0),1);
-        cv::line(plane_image, cv::Point(300, 45), cv::Point(300, 555), cv::Scalar(0, 255, 0),1);
-        //cv::namedWindow("Plan");
-        //cv::imshow("Plan", plane_image);
-        cv::waitKey(1);
         return true;
     }
-    bool CymPlanner::isGoalReached()
+
+    no_path_since_ = ros::Time(0);
+    blocked_cycles_ = 0;
+    last_collision_poses_.clear();
+
+    if (locked_side_ != 0)
     {
-        return goal_reached_;
+        state_ = PlannerState::RETURN_PATH;
+        if (!selectReturnPath(reference_path, now))
+        {
+            CandidatePath holding = generateReturnCandidate(reference_path, locked_side_);
+            const CollisionResult holding_collision = evaluatePathCollision(
+                holding.points, planning_horizon_);
+            if (holding_collision.collision)
+            {
+                selected_local_path_.clear();
+                state_ = PlannerState::STOPPING;
+                publishDebugPaths(reference_path, selected_local_path_, now);
+                publishPlannerState();
+                cmd_vel = computeSafeStopCommand(now);
+                return true;
+            }
+            selected_local_path_ = holding.points;
+            previous_offsets_.clear();
+            for (const PathPoint& point : selected_local_path_)
+            {
+                previous_offsets_.push_back(point.offset);
+            }
+        }
+    }
+    else
+    {
+        state_ = PlannerState::TRACK;
+        selected_local_path_ = reference_path;
+        previous_offsets_.clear();
+        for (const PathPoint& point : selected_local_path_)
+        {
+            previous_offsets_.push_back(point.offset);
+        }
     }
 
-} // namespace cym_planner
+    if (locked_side_ == 0)
+    {
+        last_left_candidate_.clear();
+        last_right_candidate_.clear();
+    }
+    publishDebugPaths(reference_path, selected_local_path_, now);
+    publishPlannerState();
+
+    const geometry_msgs::Twist target_command =
+        computePurePursuitCommand(robot_pose, selected_local_path_);
+    cmd_vel = applyAccelerationLimits(target_command, now);
+    return true;
+}
+
+void CymPlanner::publishPath(
+    const ros::Publisher& publisher,
+    const std::vector<PathPoint>& path,
+    const ros::Time& stamp) const
+{
+    nav_msgs::Path message;
+    message.header.frame_id = local_frame_;
+    message.header.stamp = stamp;
+    message.poses.reserve(path.size());
+    for (const PathPoint& point : path)
+    {
+        geometry_msgs::PoseStamped pose;
+        pose.header = message.header;
+        pose.pose.position.x = point.x;
+        pose.pose.position.y = point.y;
+        tf2::Quaternion orientation;
+        orientation.setRPY(0.0, 0.0, point.yaw);
+        pose.pose.orientation = tf2::toMsg(orientation);
+        message.poses.push_back(pose);
+    }
+    publisher.publish(message);
+}
+
+void CymPlanner::publishDebugPaths(
+    const std::vector<PathPoint>& reference,
+    const std::vector<PathPoint>& selected,
+    const ros::Time& stamp)
+{
+    publishPath(reference_path_pub_, reference, stamp);
+    publishPath(left_seed_path_pub_, last_left_candidate_, stamp);
+    publishPath(right_seed_path_pub_, last_right_candidate_, stamp);
+    publishPath(selected_path_pub_, selected, stamp);
+    publishCollisionFootprints(stamp);
+}
+
+void CymPlanner::publishCollisionFootprints(const ros::Time& stamp) const
+{
+    visualization_msgs::MarkerArray markers;
+    visualization_msgs::Marker clear;
+    clear.action = visualization_msgs::Marker::DELETEALL;
+    markers.markers.push_back(clear);
+
+    int marker_id = 0;
+    for (const PathPoint& pose : last_collision_poses_)
+    {
+        visualization_msgs::Marker marker;
+        marker.header.frame_id = local_frame_;
+        marker.header.stamp = stamp;
+        marker.ns = "collision_footprints";
+        marker.id = marker_id++;
+        marker.type = visualization_msgs::Marker::LINE_STRIP;
+        marker.action = visualization_msgs::Marker::ADD;
+        marker.scale.x = 0.015;
+        marker.color.r = 1.0;
+        marker.color.g = 0.0;
+        marker.color.b = 0.0;
+        marker.color.a = 0.85;
+
+        const double cosine = std::cos(pose.yaw);
+        const double sine = std::sin(pose.yaw);
+        for (const geometry_msgs::Point& footprint_point : footprint_)
+        {
+            geometry_msgs::Point world_point;
+            world_point.x = pose.x + cosine * footprint_point.x - sine * footprint_point.y;
+            world_point.y = pose.y + sine * footprint_point.x + cosine * footprint_point.y;
+            world_point.z = 0.03;
+            marker.points.push_back(world_point);
+        }
+        if (!marker.points.empty())
+        {
+            marker.points.push_back(marker.points.front());
+        }
+        markers.markers.push_back(marker);
+    }
+    collision_footprints_pub_.publish(markers);
+}
+
+std::string CymPlanner::plannerStateName() const
+{
+    switch (state_)
+    {
+        case PlannerState::TRACK:
+            return "TRACK";
+        case PlannerState::SELECT_SIDE:
+            return "SELECT_SIDE";
+        case PlannerState::AVOID_LEFT:
+            return "AVOID_LEFT";
+        case PlannerState::AVOID_RIGHT:
+            return "AVOID_RIGHT";
+        case PlannerState::RETURN_PATH:
+            return "RETURN_PATH";
+        case PlannerState::STOPPING:
+            return "STOPPING";
+        case PlannerState::GOAL_ALIGN:
+            return "GOAL_ALIGN";
+    }
+    return "UNKNOWN";
+}
+
+void CymPlanner::publishPlannerState() const
+{
+    std_msgs::String message;
+    message.data = plannerStateName();
+    planner_state_pub_.publish(message);
+}
+
+bool CymPlanner::isGoalReached()
+{
+    return goal_reached_;
+}
+
+}  // namespace cym_planner

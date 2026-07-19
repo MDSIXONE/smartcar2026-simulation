@@ -1,67 +1,70 @@
-﻿# CymPlanner 局部规划器参数
-# 修改本文件后不需要重新编译，只需重新运行 ./start_v3_clean.sh
+# CymPlanner 第一阶段参数：局部参考路径 + Footprint 扫掠 + Pure Pursuit
+# 修改后重新启动 move_base 即可生效。
 {
     "CymPlanner": {
-        # 机器人本体坐标系
         "base_link_frame": "base_link",
 
-        # 里程计坐标系
-        "odom_frame": "odom",
+        # 从最近全局路径点向前截取的规划长度，以及近期碰撞检测长度（m）
+        "planning_horizon": 2.5,
+        "collision_horizon": 1.2,
 
-        # 前视距离，数值越大越平滑，数值越小越贴近路径
-        "lookahead_distance": 0.5,
+        # 局部路径等距采样与 Footprint 扫掠插值
+        "path_resolution": 0.04,
+        "collision_check_step": 0.025,
+        "collision_yaw_step": 0.07,
+        "transform_timeout": 0.10,
 
-        # 前进速度增益：前方路径点距离乘以该值，决定提速快慢
-        "linear_x_gain": 10.0,
+        # Pure Pursuit 速度自适应前视距离
+        "lookahead_min": 0.20,
+        "lookahead_max": 0.65,
+        "lookahead_time": 0.80,
 
-        # 前进位置环D项：抑制速度变化和接近路径点时的冲动，建议从0.05开始调整
-        "linear_x_kd": 0.05,
+        # 第一轮实车/仿真测试使用保守速度，确认碰撞预测稳定后再提高
+        "max_vel_x": 0.15,
+        "max_vel_theta": 0.80,
+        "acc_lim_x": 0.45,
+        "dec_lim_x": 0.80,
+        "acc_lim_theta": 1.50,
+        "dec_lim_theta": 2.00,
+        "max_lateral_acceleration": 0.50,
 
-        # 当前禁止横向平移，此参数暂不参与车辆控制
-        "linear_y_gain": 5.0,
-
-        # 转向增益：数值越大，车头对准路径的力度越强
-        "angular_gain": 14.0,
-
-        # 最大前进速度，单位 m/s
-        "max_vel_x": 14.0,
-
-        # 当前禁止横向平移，此参数暂不参与车辆控制
-        "max_vel_y": 15.0,
-
-        # 最大旋转速度，单位 rad/s
-        "max_vel_theta": 20.5,
-
-        # 到达路径终点后的独立朝向对准参数。
-        # final_yaw_gain 越大，终点旋转越快；建议 1.5 ~ 3.0。
-        "final_yaw_gain": 12.0,
-
-        # 终点旋转速度上限，单位 rad/s；建议 0.8 ~ 1.5。
-        "final_yaw_max_vel": 10.2,
-
-        # 终点方向误差小于该值即视为完成，单位 rad。
+        # 终点停车和朝向对准
+        "final_xy_tolerance": 0.05,
         "final_yaw_tolerance": 0.10,
+        "final_yaw_gain": 2.0,
+        "final_yaw_max_vel": 0.80,
 
-        # 终点方向对准时保留的前后微调增益；设为 0 可只原地旋转。
-        "final_linear_x_gain": 1.5,
+        # 当前阶段无安全路径时先制动，再让 move_base 重新规划/恢复
+        "no_path_grace_time": 0.50,
+        "no_path_timeout": 1.00,
 
-        # 任务节点在夹取完成后发布 /sim_task3/carry_mode=true。
-        # 载物通过障碍物加工区时，前进、转向和终点对正最高速度均乘以此值。
-        "carry_speed_scale": 0.80,
+        # 左右候选、方向锁定与横向偏移细化
+        "offset_step": 0.05,
+        "max_lateral_offset": 0.50,
+        "shift_in_distance": 0.60,
+        "shift_out_distance": 0.80,
+        "obstacle_pass_margin": 0.35,
+        "desired_clearance": 0.18,
+        "hard_clearance": 0.08,
+        "distance_gradient_step": 0.05,
+        "distance_field_update_period": 0.10,
+        "optimization_iterations": 12,
+        "optimization_step": 0.05,
+        "weight_reference": 1.0,
+        "weight_smooth": 8.0,
+        "weight_obstacle": 12.0,
+        "weight_temporal": 5.0,
+        "weight_curvature": 8.0,
+        "offset_score_weight": 1.0,
+        "curvature_score_weight": 0.50,
+        "clearance_score_weight": 0.50,
+        "side_change_penalty": 2.0,
+        "obstacle_trigger_cycles": 2,
+        "side_lock_time": 1.0,
+        "clear_hold_time": 0.5,
+        "return_time": 0.80,
 
-        # 车头方向容差，单位 rad；当前边走边转逻辑中保留备用
-        "heading_tolerance": 0.20,
-
-        # 局部轨迹模拟时长，单位秒
-        "simulation_time": 0.3,
-
-        # 局部轨迹模拟步长，单位秒
-        "simulation_step": 0.05,
-
-        # 沿全局路径向前检查的实际距离，单位 m；命中障碍后请求 move_base 重规划
-        "obstacle_lookahead_distance": 0.8,
-
-        # 253 覆盖膨胀区，254 为致命障碍；代码按 cost >= 此值判定
-        "obstacle_cost_threshold": 253
+        # 载物模式速度缩放，由 /sim_task3/carry_mode 控制
+        "carry_speed_scale": 0.80
     }
 }
