@@ -270,6 +270,7 @@ bool CymPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& plan)
 
     global_plan_ = plan;
     selected_local_path_.clear();
+    escape_path_.clear();
     last_collision_poses_.clear();
     last_left_candidate_.clear();
     last_right_candidate_.clear();
@@ -425,6 +426,13 @@ std::vector<CymPlanner::PathPoint> CymPlanner::resamplePath(
     std::vector<PathPoint> sampled;
     sampled.reserve(
         static_cast<std::size_t>(std::ceil(path.back().s / resolution)) + 2U);
+    // GlobalPlanner can occasionally emit a tiny local loop around a cost
+    // gradient saddle.  The arc length of that loop is large enough to create
+    // several regular samples even though their Cartesian separation is only
+    // a few millimetres.  Keeping those samples makes the derived yaw flip by
+    // nearly pi radians and produces a false swept-footprint collision while
+    // the robot is otherwise following a clear corridor.
+    const double minimum_spatial_spacing = std::max(1e-4, 0.5 * resolution);
 
     std::size_t segment = 0;
     for (double sample_s = 0.0;
@@ -453,15 +461,34 @@ std::vector<CymPlanner::PathPoint> CymPlanner::resamplePath(
         point.yaw = angles::normalize_angle(
             first.yaw + ratio * angles::shortest_angular_distance(first.yaw, second.yaw));
         point.s = sample_s;
+        if (!sampled.empty() &&
+            std::hypot(point.x - sampled.back().x, point.y - sampled.back().y) <
+                minimum_spatial_spacing)
+        {
+            continue;
+        }
         sampled.push_back(point);
     }
 
-    if (sampled.empty() ||
-        std::hypot(
-            sampled.back().x - path.back().x,
-            sampled.back().y - path.back().y) > 1e-4)
+    if (sampled.empty())
     {
         sampled.push_back(path.back());
+    }
+    else
+    {
+        const double endpoint_distance = std::hypot(
+            sampled.back().x - path.back().x,
+            sampled.back().y - path.back().y);
+        if (endpoint_distance >= minimum_spatial_spacing)
+        {
+            sampled.push_back(path.back());
+        }
+        else if (endpoint_distance > 1e-4)
+        {
+            // Preserve the exact global-plan endpoint without reintroducing a
+            // millimetre-scale terminal segment.
+            sampled.back() = path.back();
+        }
     }
 
     computePathGeometry(sampled);
@@ -556,6 +583,18 @@ CymPlanner::CollisionResult CymPlanner::evaluatePathCollision(
         return result;
     }
 
+    // A rolling costmap can report a transient footprint overlap at the exact
+    // current pose (especially after a recovery rotation).  All lateral
+    // candidates share that first pose, so treating it as a hard collision
+    // makes every escape candidate invalid.  Allow only a short, bounded
+    // escape window; any collision after the robot has left that window is
+    // still rejected normally.
+    const bool starts_in_collision = checkPoseCollision(
+        path.front().x, path.front().y, path.front().yaw);
+    bool escaped_start_collision = !starts_in_collision;
+    const double start_escape_distance = std::max(
+        0.20, circumscribed_radius_ + 2.0 * collision_check_step_);
+
     for (std::size_t index = 0; index + 1 < path.size(); ++index)
     {
         if (path[index].s > horizon)
@@ -568,6 +607,12 @@ CymPlanner::CollisionResult CymPlanner::evaluatePathCollision(
         const double distance = std::hypot(dx, dy);
         const double dyaw = angles::shortest_angular_distance(
             path[index].yaw, path[index + 1].yaw);
+        // Treat in-place rotation as swept distance as well.  Without this
+        // small equivalent arc length, every sample of a pure rotation has
+        // s == 0 and the bounded start-overlap escape window can never be
+        // exited even when the changed footprint is already clear.
+        const double segment_progress = std::max(
+            distance, circumscribed_radius_ * std::abs(dyaw));
 
         const int translation_steps = static_cast<int>(
             std::ceil(distance / collision_check_step_));
@@ -578,7 +623,7 @@ CymPlanner::CollisionResult CymPlanner::evaluatePathCollision(
         for (int step = 0; step <= steps; ++step)
         {
             const double ratio = static_cast<double>(step) / static_cast<double>(steps);
-            const double sample_s = path[index].s + ratio * distance;
+            const double sample_s = path[index].s + ratio * segment_progress;
             if (sample_s > horizon + collision_check_step_)
             {
                 break;
@@ -590,7 +635,20 @@ CymPlanner::CollisionResult CymPlanner::evaluatePathCollision(
             sample.yaw = angles::normalize_angle(path[index].yaw + ratio * dyaw);
             sample.s = sample_s;
 
-            if (!checkPoseCollision(sample.x, sample.y, sample.yaw))
+            const bool sample_collision = checkPoseCollision(
+                sample.x, sample.y, sample.yaw);
+            if (!sample_collision)
+            {
+                if (starts_in_collision && sample_s <= start_escape_distance)
+                {
+                    escaped_start_collision = true;
+                    continue;
+                }
+                continue;
+            }
+
+            if (starts_in_collision && !escaped_start_collision &&
+                sample_s <= start_escape_distance)
             {
                 continue;
             }
@@ -613,6 +671,14 @@ CymPlanner::CollisionResult CymPlanner::evaluatePathCollision(
                 last_collision_poses_.push_back(sample);
             }
         }
+    }
+
+    if (starts_in_collision && !escaped_start_collision)
+    {
+        result.collision = true;
+        result.first_collision_index = 0;
+        result.first_collision_distance = 0.0;
+        result.last_collision_index = 0;
     }
     return result;
 }
@@ -1374,7 +1440,6 @@ geometry_msgs::Twist CymPlanner::applyAccelerationLimits(
         acc_lim_x_,
         dec_lim_x_,
         dt);
-    limited.linear.x = std::max(0.0, limited.linear.x);
     limited.angular.z = clampVelocityDelta(
         target_cmd.angular.z,
         previous_cmd_.angular.z,
@@ -1390,6 +1455,120 @@ geometry_msgs::Twist CymPlanner::applyAccelerationLimits(
 geometry_msgs::Twist CymPlanner::computeSafeStopCommand(const ros::Time& now)
 {
     return applyAccelerationLimits(geometry_msgs::Twist(), now);
+}
+
+bool CymPlanner::computeEscapeCommand(
+    const geometry_msgs::PoseStamped& robot_pose,
+    const ros::Time& now,
+    geometry_msgs::Twist& cmd_vel)
+{
+    escape_path_.clear();
+    const double yaw = tf2::getYaw(robot_pose.pose.orientation);
+    const double probe_distance = std::max(
+        0.45, circumscribed_radius_ + 0.25);
+    const double sample_step = std::max(0.025, collision_check_step_);
+    const double probe_speed = 0.08;
+    const double rotation_duration = 1.20;
+
+    // Reverse first: at a tight inner corner the robot's rear usually points
+    // back into the open corridor.  The small turning variants handle cases
+    // where a straight reverse is blocked by the corner geometry.
+    struct EscapeArc
+    {
+        double direction;
+        double angular;
+    };
+    const std::vector<EscapeArc> arcs = {
+        {-1.0, 0.0},
+        {-1.0, 0.45},
+        {-1.0, -0.45},
+        {1.0, 0.0},
+        {1.0, 0.45},
+        {1.0, -0.45},
+        {0.0, 0.70},
+        {0.0, -0.70},
+    };
+
+    for (const EscapeArc& arc : arcs)
+    {
+        std::vector<PathPoint> path;
+        path.reserve(static_cast<std::size_t>(probe_distance / sample_step) + 2U);
+
+        PathPoint start;
+        start.x = robot_pose.pose.position.x;
+        start.y = robot_pose.pose.position.y;
+        start.yaw = yaw;
+        start.s = 0.0;
+        path.push_back(start);
+
+        double x = start.x;
+        double y = start.y;
+        double heading = yaw;
+        double travelled = 0.0;
+        const double signed_speed = arc.direction * probe_speed;
+        const int steps = arc.direction == 0.0
+            ? static_cast<int>(std::ceil(rotation_duration / 0.05))
+            : static_cast<int>(std::ceil(probe_distance / sample_step));
+        for (int step = 1; step <= steps; ++step)
+        {
+            double next_heading = heading;
+            if (arc.direction == 0.0)
+            {
+                const double dt = 0.05;
+                next_heading = angles::normalize_angle(
+                    heading + arc.angular * dt);
+                travelled += circumscribed_radius_ *
+                    std::abs(angles::shortest_angular_distance(
+                        heading, next_heading));
+            }
+            else
+            {
+                const double ds = std::min(
+                    sample_step, probe_distance - travelled);
+                if (ds <= 0.0)
+                {
+                    break;
+                }
+                next_heading = angles::normalize_angle(
+                    heading + arc.angular * (ds / probe_speed));
+                const double midpoint_heading = angles::normalize_angle(
+                    0.5 * (heading + next_heading));
+                x += arc.direction * ds * std::cos(midpoint_heading);
+                y += arc.direction * ds * std::sin(midpoint_heading);
+                travelled += ds;
+            }
+
+            PathPoint point;
+            point.x = x;
+            point.y = y;
+            point.yaw = next_heading;
+            point.s = travelled;
+            path.push_back(point);
+            heading = next_heading;
+        }
+
+        const CollisionResult collision = evaluatePathCollision(
+            path, probe_distance);
+        if (collision.collision)
+        {
+            continue;
+        }
+
+        geometry_msgs::Twist target;
+        target.linear.x = signed_speed;
+        target.angular.z = arc.angular;
+        escape_path_ = path;
+        cmd_vel = applyAccelerationLimits(target, now);
+        ROS_WARN_THROTTLE(
+            1.0,
+            "cym_planner: executing a near-term collision escape with %.2f m/s, "
+            "%.2f rad/s",
+            target.linear.x,
+            target.angular.z);
+        return true;
+    }
+
+    return false;
 }
 
 double CymPlanner::distanceToGoal(
@@ -1511,6 +1690,22 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
             return true;
         }
 
+        // A transient rolling-costmap overlap at the current pose can make
+        // every lateral avoidance candidate fail at its shared start point.
+        // Before braking into STOPPING, try a bounded swept-footprint escape
+        // (reverse is preferred for the inner-corner geometry).
+        const double escape_trigger_distance = std::max(
+            0.55, circumscribed_radius_ + 0.10);
+        if (collision.first_collision_distance <= escape_trigger_distance &&
+            computeEscapeCommand(robot_pose, now, cmd_vel))
+        {
+            state_ = PlannerState::TRACK;
+            selected_local_path_ = escape_path_;
+            publishDebugPaths(reference_path, selected_local_path_, now);
+            publishPlannerState();
+            return true;
+        }
+
         state_ = PlannerState::STOPPING;
         selected_local_path_.clear();
         publishDebugPaths(reference_path, selected_local_path_, now);
@@ -1536,6 +1731,7 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
 
     no_path_since_ = ros::Time(0);
     blocked_cycles_ = 0;
+    escape_path_.clear();
     last_collision_poses_.clear();
 
     if (locked_side_ != 0)
@@ -1548,11 +1744,26 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
                 holding.points, planning_horizon_);
             if (holding_collision.collision)
             {
-                selected_local_path_.clear();
-                state_ = PlannerState::STOPPING;
+                // The near reference segment was already checked above and is
+                // clear.  A stale avoidance offset can nevertheless collide
+                // farther down the planning horizon while returning from the
+                // previous obstacle.  Stopping here deadlocks the robot well
+                // before that future corner.  Drop the old side lock and keep
+                // tracking the safe reference; the normal collision horizon
+                // will create a fresh left/right decision when needed.
+                locked_side_ = 0;
+                return_scale_ = 0.0;
+                path_clear_since_ = ros::Time(0);
+                previous_offsets_.clear();
+                selected_local_path_ = reference_path;
+                last_collision_poses_.clear();
+                state_ = PlannerState::TRACK;
+                state_enter_time_ = now;
                 publishDebugPaths(reference_path, selected_local_path_, now);
                 publishPlannerState();
-                cmd_vel = computeSafeStopCommand(now);
+                const geometry_msgs::Twist target_command =
+                    computePurePursuitCommand(robot_pose, selected_local_path_);
+                cmd_vel = applyAccelerationLimits(target_command, now);
                 return true;
             }
             selected_local_path_ = holding.points;

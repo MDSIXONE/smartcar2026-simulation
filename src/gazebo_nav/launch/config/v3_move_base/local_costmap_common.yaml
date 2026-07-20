@@ -19,5 +19,9 @@ obstacle_layer:
 
 inflation_layer:
   enabled: true
-  inflation_radius: 0.07
-  cost_scaling_factor: 4.0
+# The local planner performs its own footprint-swept collision check.  Keep a
+# small sensor-costmap buffer here so the rolling laser map does not turn a
+# physically clear 0.28 m corridor into an inscribed-cost obstacle before the
+# planner can rotate/escape at a corner.
+inflation_radius: 0.03
+cost_scaling_factor: 4.0

@@ -87,12 +87,50 @@ Visualization Manager:
     - Alpha: 1
       Buffer Length: 1
       Class: rviz/Path
-      Color: 255; 180; 30
+      Color: 255; 225; 30
       Enabled: true
       Line Style: Lines
-      Line Width: 0.03
-      Name: Cym Planner Command Path
-      Topic: /move_base/GlobalPlanner/plan
+      Line Width: 0.025
+      Name: CYM Reference Path
+      Topic: /cym_planner/reference_path
+      Value: true
+    - Alpha: 0.85
+      Buffer Length: 1
+      Class: rviz/Path
+      Color: 40; 220; 80
+      Enabled: true
+      Line Style: Lines
+      Line Width: 0.025
+      Name: CYM Left Candidate
+      Topic: /cym_planner/left_seed_path
+      Value: true
+    - Alpha: 0.85
+      Buffer Length: 1
+      Class: rviz/Path
+      Color: 220; 60; 220
+      Enabled: true
+      Line Style: Lines
+      Line Width: 0.025
+      Name: CYM Right Candidate
+      Topic: /cym_planner/right_seed_path
+      Value: true
+    - Alpha: 1
+      Buffer Length: 1
+      Class: rviz/Path
+      Color: 20; 255; 255
+      Enabled: true
+      Line Style: Lines
+      Line Width: 0.07
+      Name: CYM Selected Local Path
+      Topic: /cym_planner/selected_path
+      Value: true
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /cym_planner/predicted_footprints
+      Name: CYM Collision Footprints
+      Namespaces:
+        collision_footprints: true
+      Queue Size: 100
       Value: true
     - Class: rviz/Pose
       Color: 0; 255; 0
@@ -122,7 +160,9 @@ Visualization Manager:
     Current:
       Class: rviz/TopDownOrtho
       Name: TopDownOrtho
-      Scale: 12
+      # Use a map-scale view that fills the RViz canvas; this keeps the
+      # selected local path visible at the same time as the surrounding map.
+      Scale: 120
       Target Frame: <Fixed Frame>
       X: 0
       Y: -1.5

@@ -185,6 +185,15 @@ private:
     geometry_msgs::Twist computeSafeStopCommand(
         const ros::Time& now);
 
+    // When a near-term collision leaves no lateral candidate, probe a small
+    // set of bounded forward/reverse arcs and use the first one whose swept
+    // footprint reaches free space.  This also handles a rolling-costmap
+    // start-footprint overlap and tight corridor corners.
+    bool computeEscapeCommand(
+        const geometry_msgs::PoseStamped& robot_pose,
+        const ros::Time& now,
+        geometry_msgs::Twist& cmd_vel);
+
     double clampVelocityDelta(
         double target,
         double previous,
@@ -221,6 +230,7 @@ private:
 
     std::vector<geometry_msgs::PoseStamped> global_plan_;
     std::vector<PathPoint> selected_local_path_;
+    std::vector<PathPoint> escape_path_;
     std::vector<PathPoint> last_collision_poses_;
     std::vector<PathPoint> last_left_candidate_;
     std::vector<PathPoint> last_right_candidate_;
