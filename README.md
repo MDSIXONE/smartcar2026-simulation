@@ -35,6 +35,10 @@ roslaunch car3 task3_execute.launch cargo_category:="电子产品" cargo_name:="
 
 完整任务说明、手动标定、故障排查与参数说明见 [TASK3_RUNBOOK.md](TASK3_RUNBOOK.md)。
 
+如需在 WSL 中检查 `CymPlanner` 的前视车体轮廓，请按
+[WSL RViz 启动与检查](docs/WSL_RVIZ_LAUNCH.md) 执行。该文档包含干净启动、
+RViz 观察点和完整取放任务的命令。
+
 ## WSL Ubuntu 20.04 deployment
 
 For a reproducible local WSL setup, ROS Master environment, Gazebo startup,
