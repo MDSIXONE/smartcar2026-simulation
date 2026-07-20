@@ -39,6 +39,9 @@ roslaunch car3 task3_execute.launch cargo_category:="电子产品" cargo_name:="
 [WSL RViz 启动与检查](docs/WSL_RVIZ_LAUNCH.md) 执行。该文档包含干净启动、
 RViz 观察点和完整取放任务的命令。
 
+使用车载 RGB 相机采集随机物块的 YOLO 图像和标签，请见
+[YOLO 数据采集](docs/YOLO_DATASET_CAPTURE.md)。
+
 ## WSL Ubuntu 20.04 deployment
 
 For a reproducible local WSL setup, ROS Master environment, Gazebo startup,
