@@ -76,7 +76,7 @@ private:
 
     struct CandidatePath
     {
-        // -1: 右绕，0: 参考路径，+1: 左绕。
+        // -1: 右侧占优，0: 混合/参考路径，+1: 左侧占优。
         int side = 0;
         double peak_offset = 0.0;
         double score = std::numeric_limits<double>::infinity();
@@ -295,6 +295,10 @@ private:
     double weight_obstacle_ = 12.0;
     double weight_temporal_ = 5.0;
     double weight_curvature_ = 8.0;
+    // Relative contributions of the two-sided elastic obstacle force.
+    double weight_side_cost_ = 1.0;
+    double weight_side_clearance_ = 0.8;
+    double weight_side_distance_ = 0.25;
     double clearance_score_weight_ = 0.50;
     double offset_score_weight_ = 1.0;
     double curvature_score_weight_ = 0.50;

@@ -142,6 +142,12 @@ void CymPlanner::initialize(
     loadPlannerParam(planner_nh, legacy_nh, "weight_temporal", weight_temporal_, 5.0);
     loadPlannerParam(planner_nh, legacy_nh, "weight_curvature", weight_curvature_, 8.0);
     loadPlannerParam(
+        planner_nh, legacy_nh, "weight_side_cost", weight_side_cost_, 1.0);
+    loadPlannerParam(
+        planner_nh, legacy_nh, "weight_side_clearance", weight_side_clearance_, 0.8);
+    loadPlannerParam(
+        planner_nh, legacy_nh, "weight_side_distance", weight_side_distance_, 0.25);
+    loadPlannerParam(
         planner_nh, legacy_nh, "offset_score_weight", offset_score_weight_, 1.0);
     loadPlannerParam(
         planner_nh, legacy_nh, "curvature_score_weight", curvature_score_weight_, 0.50);
@@ -200,6 +206,9 @@ void CymPlanner::initialize(
     weight_obstacle_ = std::max(0.0, weight_obstacle_);
     weight_temporal_ = std::max(0.0, weight_temporal_);
     weight_curvature_ = std::max(0.0, weight_curvature_);
+    weight_side_cost_ = std::max(0.0, weight_side_cost_);
+    weight_side_clearance_ = std::max(0.0, weight_side_clearance_);
+    weight_side_distance_ = std::max(0.0, weight_side_distance_);
     offset_score_weight_ = std::max(0.0, offset_score_weight_);
     curvature_score_weight_ = std::max(0.0, curvature_score_weight_);
     clearance_score_weight_ = std::max(0.0, clearance_score_weight_);
@@ -245,6 +254,11 @@ void CymPlanner::initialize(
         lookahead_max_,
         max_vel_x_,
         max_vel_theta_);
+    ROS_INFO(
+        "cym_planner elastic lateral force enabled | side cost/clearance/distance weights=%.2f/%.2f/%.2f",
+        weight_side_cost_,
+        weight_side_clearance_,
+        weight_side_distance_);
 }
 
 void CymPlanner::carryModeCallback(const std_msgs::Bool::ConstPtr& message)
@@ -976,42 +990,80 @@ double CymPlanner::computeLateralObstacleForce(
     const double x = reference.x + offset * nx;
     const double y = reference.y + offset * ny;
 
-    const double left_distance = getObstacleDistance(
-        x + distance_gradient_step_ * nx,
-        y + distance_gradient_step_ * ny);
-    const double right_distance = getObstacleDistance(
-        x - distance_gradient_step_ * nx,
-        y - distance_gradient_step_ * ny);
+    // Probe both sides of the elastic-band node.  Positive force means
+    // "move left" (the +normal direction), negative means "move right".
+    // Keeping both samples in the same force calculation is important: the
+    // optimizer should move toward the cheaper side, not commit to a binary
+    // left/right branch before the band has converged.
+    const double probe = std::max(distance_gradient_step_, 0.5 * path_resolution_);
+    const double left_x = x + probe * nx;
+    const double left_y = y + probe * ny;
+    const double right_x = x - probe * nx;
+    const double right_y = y - probe * ny;
+
+    const double left_cost = sampleCost(left_x, left_y);
+    const double right_cost = sampleCost(right_x, right_y);
+    const double left_distance = getObstacleDistance(left_x, left_y);
+    const double right_distance = getObstacleDistance(right_x, right_y);
     const double current_distance = getObstacleDistance(x, y);
 
-    if (!std::isfinite(left_distance) && !std::isfinite(right_distance))
+    const double cost_force = clampValue(
+        (right_cost - left_cost) / 255.0, -1.0, 1.0);
+
+    auto clearancePenalty = [this](double distance) {
+        if (!std::isfinite(distance))
+        {
+            return 0.0;
+        }
+        const double scale = std::max(desired_clearance_, 0.01);
+        return clampValue((desired_clearance_ - distance) / scale, 0.0, 1.0);
+    };
+    // A side with the larger penalty is more expensive, so the difference is
+    // deliberately right-minus-left to preserve the force sign convention.
+    const double clearance_force = clampValue(
+        clearancePenalty(right_distance) - clearancePenalty(left_distance),
+        -1.0,
+        1.0);
+
+    double distance_force = 0.0;
+    if (std::isfinite(left_distance) && std::isfinite(right_distance))
     {
-        return 0.0;
+        // Larger clearance on the left produces a positive force.  Normalize
+        // by the probe spacing so this term remains useful outside the
+        // inflated costmap plateau.
+        distance_force = clampValue(
+            (left_distance - right_distance) /
+                std::max(2.0 * probe, kEpsilon),
+            -1.0,
+            1.0);
     }
 
-    const double safe_left = std::isfinite(left_distance)
-        ? left_distance
-        : desired_clearance_ * 2.0;
-    const double safe_right = std::isfinite(right_distance)
-        ? right_distance
-        : desired_clearance_ * 2.0;
-    double gradient = (safe_left - safe_right) /
-        std::max(2.0 * distance_gradient_step_, kEpsilon);
-    if (current_distance < desired_clearance_)
+    const double total_weight = weight_side_cost_ +
+        weight_side_clearance_ + weight_side_distance_;
+    double force = 0.0;
+    if (total_weight > kEpsilon)
     {
-        gradient *= desired_clearance_ - current_distance;
+        force = (
+            weight_side_cost_ * cost_force +
+            weight_side_clearance_ * clearance_force +
+            weight_side_distance_ * distance_force) / total_weight;
     }
+
+    // When the node itself is already inside the hard clearance band, retain
+    // a small amount of repulsion instead of allowing the reference/smoothness
+    // terms to pull it back through the obstacle.  The direction still comes
+    // from the relative cost of both sides.
     if (current_distance < hard_clearance_)
     {
-        gradient *= 2.0;
+        force *= 1.5;
     }
-    return clampValue(gradient, -1.0, 1.0);
+    return clampValue(force, -1.0, 1.0);
 }
 
 void CymPlanner::refineOffsets(
     const std::vector<PathPoint>& reference,
     std::vector<double>& offsets,
-    int locked_side) const
+    int /*locked_side*/) const
 {
     if (reference.size() < 5 || offsets.size() != reference.size())
     {
@@ -1048,14 +1100,6 @@ void CymPlanner::refineOffsets(
                 offsets[index] + optimization_step_ * update,
                 -max_lateral_offset_,
                 max_lateral_offset_);
-            if (locked_side > 0)
-            {
-                next[index] = std::max(0.0, next[index]);
-            }
-            else if (locked_side < 0)
-            {
-                next[index] = std::min(0.0, next[index]);
-            }
         }
         next.front() = 0.0;
         next.back() = 0.0;
@@ -1218,12 +1262,34 @@ bool CymPlanner::selectAvoidancePath(
     {
         offsets.push_back(point.offset);
     }
-    refineOffsets(reference, offsets, chosen->side);
-    CandidatePath optimized = generatePathFromOffsets(reference, offsets, chosen->side);
+    // The collision-free left/right candidate is only a safe initialization.
+    // From here on the elastic band is unconstrained in sign: every node can
+    // move continuously according to the cost difference between its two
+    // lateral probes.  This allows a path to bend through a non-symmetric
+    // corridor instead of remaining locked to one side of the seed.
+    refineOffsets(reference, offsets, 0);
+    CandidatePath optimized = generatePathFromOffsets(reference, offsets, 0);
     const CollisionResult optimized_collision =
         evaluatePathCollision(optimized.points, planning_horizon_);
     if (!optimized_collision.collision)
     {
+        double signed_offset = 0.0;
+        double signed_weight = 0.0;
+        for (const PathPoint& point : optimized.points)
+        {
+            const double weight = std::max(point.s, path_resolution_);
+            signed_offset += weight * point.offset;
+            signed_weight += weight;
+        }
+        const double mean_offset = signed_weight > kEpsilon
+            ? signed_offset / signed_weight
+            : 0.0;
+        // Keep side_lock as hysteresis metadata only.  It no longer constrains
+        // the elastic optimizer, but it prevents rapid state toggling when a
+        // converged band is nearly centered.
+        optimized.side = std::abs(mean_offset) > 0.5 * offset_step_
+            ? (mean_offset > 0.0 ? 1 : -1)
+            : chosen->side;
         optimized.valid = true;
         optimized.score = scoreCandidate(optimized);
         chosen = &optimized;

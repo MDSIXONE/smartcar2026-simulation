@@ -63,6 +63,24 @@ public:
         return planner.clampVelocityDelta(
             target, previous, increase_limit, decrease_limit, dt);
     }
+
+    static void refineOffsets(
+        CymPlanner& planner,
+        const std::vector<std::pair<double, double>>& positions,
+        std::vector<double>& offsets,
+        int locked_side)
+    {
+        std::vector<CymPlanner::PathPoint> reference;
+        for (const auto& position : positions)
+        {
+            CymPlanner::PathPoint point;
+            point.x = position.first;
+            point.y = position.second;
+            reference.push_back(point);
+        }
+        planner.computePathGeometry(reference);
+        planner.refineOffsets(reference, offsets, locked_side);
+    }
 };
 
 TEST(CymPlannerGeometryTest, ResamplesStraightPathAtFixedSpacingAndKeepsEndpoint)
@@ -126,6 +144,22 @@ TEST(CymPlannerGeometryTest, AppliesSeparateAccelerationAndDecelerationLimits)
             planner, 0.0, 0.5, 0.4, 0.8, 0.1),
         0.42,
         1e-9);
+}
+
+TEST(CymPlannerGeometryTest, ElasticRefinementIsNotClampedToLockedSide)
+{
+    CymPlanner planner;
+    std::vector<double> offsets(9, -0.10);
+    CymPlannerTestPeer::refineOffsets(
+        planner,
+        {{0.00, 0.0}, {0.05, 0.0}, {0.10, 0.0}, {0.15, 0.0}, {0.20, 0.0},
+         {0.25, 0.0}, {0.30, 0.0}, {0.35, 0.0}, {0.40, 0.0}},
+        offsets,
+        1);
+
+    // A positive lock is now hysteresis metadata only; the elastic band can
+    // retain a negative offset when the continuous force points right.
+    EXPECT_LT(offsets[4], -1e-4);
 }
 
 }  // namespace cym_planner
