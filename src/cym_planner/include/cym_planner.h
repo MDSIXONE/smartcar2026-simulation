@@ -174,7 +174,11 @@ private:
     bool computeGoalAlignCommand(
         geometry_msgs::Twist& cmd_vel);
 
-    geometry_msgs::Twist computePurePursuitCommand(
+    // Track the selected (already optimized) path with a standalone
+    // lateral/heading PD controller.  CymPlanner is responsible for path
+    // geometry and obstacle avoidance; this method is the controller layer
+    // that turns the resulting path into a velocity command.
+    geometry_msgs::Twist computeTrackingPDCommand(
         const geometry_msgs::PoseStamped& robot_pose,
         const std::vector<PathPoint>& path);
 
@@ -262,10 +266,10 @@ private:
     double lookahead_min_ = 0.20;
     double lookahead_max_ = 0.65;
     double lookahead_time_ = 0.80;
-    double tracking_lateral_kp_ = 1.80;
-    double tracking_lateral_kd_ = 0.12;
-    double tracking_heading_kp_ = 1.20;
-    double tracking_heading_kd_ = 0.08;
+    double tracking_lateral_kp_ = 2.20;
+    double tracking_lateral_kd_ = 0.16;
+    double tracking_heading_kp_ = 1.60;
+    double tracking_heading_kd_ = 0.10;
 
     double max_vel_x_ = 0.15;
     double max_vel_theta_ = 0.80;

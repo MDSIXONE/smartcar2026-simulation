@@ -81,6 +81,24 @@ public:
         planner.computePathGeometry(reference);
         planner.refineOffsets(reference, offsets, locked_side);
     }
+
+    static geometry_msgs::Twist trackWithPD(
+        CymPlanner& planner,
+        const std::vector<std::pair<double, double>>& positions)
+    {
+        geometry_msgs::PoseStamped robot_pose;
+        robot_pose.pose.orientation.w = 1.0;
+        std::vector<CymPlanner::PathPoint> path;
+        for (const auto& position : positions)
+        {
+            CymPlanner::PathPoint point;
+            point.x = position.first;
+            point.y = position.second;
+            path.push_back(point);
+        }
+        planner.computePathGeometry(path);
+        return planner.computeTrackingPDCommand(robot_pose, path);
+    }
 };
 
 TEST(CymPlannerGeometryTest, ResamplesStraightPathAtFixedSpacingAndKeepsEndpoint)
@@ -162,10 +180,26 @@ TEST(CymPlannerGeometryTest, ElasticRefinementIsNotClampedToLockedSide)
     EXPECT_LT(offsets[4], -1e-4);
 }
 
+TEST(CymPlannerGeometryTest, TrackingControllerUsesPDPathErrors)
+{
+    CymPlanner planner;
+    const geometry_msgs::Twist left_command =
+        CymPlannerTestPeer::trackWithPD(
+            planner, {{0.0, 0.0}, {0.50, 0.10}, {1.00, 0.20}});
+    EXPECT_GT(left_command.angular.z, 0.0);
+
+    CymPlanner right_planner;
+    const geometry_msgs::Twist right_command =
+        CymPlannerTestPeer::trackWithPD(
+            right_planner, {{0.0, 0.0}, {0.50, -0.10}, {1.00, -0.20}});
+    EXPECT_LT(right_command.angular.z, 0.0);
+}
+
 }  // namespace cym_planner
 
 int main(int argc, char** argv)
 {
+    ros::Time::init();
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

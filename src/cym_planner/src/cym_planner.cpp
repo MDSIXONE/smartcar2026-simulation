@@ -100,13 +100,13 @@ void CymPlanner::initialize(
     loadPlannerParam(planner_nh, legacy_nh, "lookahead_max", lookahead_max_, 0.65);
     loadPlannerParam(planner_nh, legacy_nh, "lookahead_time", lookahead_time_, 0.80);
     loadPlannerParam(
-        planner_nh, legacy_nh, "tracking_lateral_kp", tracking_lateral_kp_, 1.80);
+        planner_nh, legacy_nh, "tracking_lateral_kp", tracking_lateral_kp_, 2.20);
     loadPlannerParam(
-        planner_nh, legacy_nh, "tracking_lateral_kd", tracking_lateral_kd_, 0.12);
+        planner_nh, legacy_nh, "tracking_lateral_kd", tracking_lateral_kd_, 0.16);
     loadPlannerParam(
-        planner_nh, legacy_nh, "tracking_heading_kp", tracking_heading_kp_, 1.20);
+        planner_nh, legacy_nh, "tracking_heading_kp", tracking_heading_kp_, 1.60);
     loadPlannerParam(
-        planner_nh, legacy_nh, "tracking_heading_kd", tracking_heading_kd_, 0.08);
+        planner_nh, legacy_nh, "tracking_heading_kd", tracking_heading_kd_, 0.10);
 
     loadPlannerParam(planner_nh, legacy_nh, "max_vel_x", max_vel_x_, 0.15);
     loadPlannerParam(planner_nh, legacy_nh, "max_vel_theta", max_vel_theta_, 0.80);
@@ -1434,7 +1434,7 @@ bool CymPlanner::computeGoalAlignCommand(geometry_msgs::Twist& cmd_vel)
     return true;
 }
 
-geometry_msgs::Twist CymPlanner::computePurePursuitCommand(
+geometry_msgs::Twist CymPlanner::computeTrackingPDCommand(
     const geometry_msgs::PoseStamped& robot_pose,
     const std::vector<PathPoint>& path)
 {
@@ -1516,11 +1516,6 @@ geometry_msgs::Twist CymPlanner::computePurePursuitCommand(
         return command;
     }
 
-    const double distance_squared = std::max(
-        target_x * target_x + target_y * target_y, 1e-4);
-    const double curvature = 2.0 * target_y / distance_squared;
-    const double curve_speed = std::sqrt(
-        max_lateral_acceleration_ / std::max(std::abs(curvature), 1e-3));
     const double remaining_goal_distance = distanceToGoal(robot_pose);
     const double goal_speed = std::isfinite(remaining_goal_distance)
         ? std::sqrt(std::max(0.0, 2.0 * dec_lim_x_ * remaining_goal_distance))
@@ -1532,14 +1527,17 @@ geometry_msgs::Twist CymPlanner::computePurePursuitCommand(
 
     command.linear.x = std::min(
         max_vel_x_ * motion_scale,
-        std::min(curve_speed, goal_speed)) * heading_scale * lateral_scale;
+        goal_speed) * heading_scale * lateral_scale;
     const double pd_angular =
         tracking_lateral_kp_ * lateral_error +
         tracking_lateral_kd_ * lateral_error_rate +
         tracking_heading_kp_ * heading_error +
         tracking_heading_kd_ * heading_error_rate;
+    // Do not steer from the path optimizer's curvature here.  The selected
+    // path is the controller reference; angular velocity is generated only
+    // by the explicitly configured lateral/heading PD terms.
     command.angular.z = clampValue(
-        command.linear.x * curvature + pd_angular,
+        pd_angular,
         -max_vel_theta_ * motion_scale,
         max_vel_theta_ * motion_scale);
     return command;
@@ -1968,7 +1966,7 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
             publishDebugPaths(reference_path, selected_local_path_, now);
             publishPlannerState();
             const geometry_msgs::Twist target_command =
-                computePurePursuitCommand(robot_pose, selected_local_path_);
+                computeTrackingPDCommand(robot_pose, selected_local_path_);
             cmd_vel = applyAccelerationLimits(target_command, now);
             return true;
         }
@@ -2047,7 +2045,7 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
                 publishDebugPaths(reference_path, selected_local_path_, now);
                 publishPlannerState();
                 const geometry_msgs::Twist target_command =
-                    computePurePursuitCommand(robot_pose, selected_local_path_);
+                    computeTrackingPDCommand(robot_pose, selected_local_path_);
                 cmd_vel = applyAccelerationLimits(target_command, now);
                 return true;
             }
@@ -2079,7 +2077,7 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     publishPlannerState();
 
     const geometry_msgs::Twist target_command =
-        computePurePursuitCommand(robot_pose, selected_local_path_);
+        computeTrackingPDCommand(robot_pose, selected_local_path_);
     cmd_vel = applyAccelerationLimits(target_command, now);
     return true;
 }

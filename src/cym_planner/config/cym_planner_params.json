@@ -1,4 +1,4 @@
-# CymPlanner 第一阶段参数：局部参考路径 + Footprint 扫掠 + Pure Pursuit
+# CymPlanner 参数：局部路径优化 + Footprint 扫掠 + 独立 PD 跟踪控制器
 # 修改后重新启动 move_base 即可生效。
 {
     "CymPlanner": {
@@ -14,14 +14,15 @@
         "collision_yaw_step": 0.07,
         "transform_timeout": 0.10,
 
-        # Pure Pursuit 速度自适应前视距离
+        # PD 控制器用于选取前方参考点（不直接参与路径偏移优化）
         "lookahead_min": 0.20,
         "lookahead_max": 0.65,
         "lookahead_time": 0.80,
-        "tracking_lateral_kp": 1.80,
-        "tracking_lateral_kd": 0.12,
-        "tracking_heading_kp": 1.20,
-        "tracking_heading_kd": 0.08,
+        # 仅用于跟踪 CymPlanner 输出的局部路径；路径偏移优化不直接输出角速度
+        "tracking_lateral_kp": 2.20,
+        "tracking_lateral_kd": 0.16,
+        "tracking_heading_kp": 1.60,
+        "tracking_heading_kd": 0.10,
 
         # 第一轮实车/仿真测试使用保守速度，确认碰撞预测稳定后再提高
         "max_vel_x": 0.15,
