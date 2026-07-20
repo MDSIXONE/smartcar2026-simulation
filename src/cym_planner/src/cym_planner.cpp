@@ -99,6 +99,14 @@ void CymPlanner::initialize(
     loadPlannerParam(planner_nh, legacy_nh, "lookahead_min", lookahead_min_, 0.20);
     loadPlannerParam(planner_nh, legacy_nh, "lookahead_max", lookahead_max_, 0.65);
     loadPlannerParam(planner_nh, legacy_nh, "lookahead_time", lookahead_time_, 0.80);
+    loadPlannerParam(
+        planner_nh, legacy_nh, "tracking_lateral_kp", tracking_lateral_kp_, 1.80);
+    loadPlannerParam(
+        planner_nh, legacy_nh, "tracking_lateral_kd", tracking_lateral_kd_, 0.12);
+    loadPlannerParam(
+        planner_nh, legacy_nh, "tracking_heading_kp", tracking_heading_kp_, 1.20);
+    loadPlannerParam(
+        planner_nh, legacy_nh, "tracking_heading_kd", tracking_heading_kd_, 0.08);
 
     loadPlannerParam(planner_nh, legacy_nh, "max_vel_x", max_vel_x_, 0.15);
     loadPlannerParam(planner_nh, legacy_nh, "max_vel_theta", max_vel_theta_, 0.80);
@@ -159,6 +167,7 @@ void CymPlanner::initialize(
     loadPlannerParam(planner_nh, legacy_nh, "side_lock_time", side_lock_time_, 1.0);
     loadPlannerParam(planner_nh, legacy_nh, "clear_hold_time", clear_hold_time_, 0.5);
     loadPlannerParam(planner_nh, legacy_nh, "return_time", return_time_, 0.80);
+    loadPlannerParam(planner_nh, legacy_nh, "escape_hold_time", escape_hold_time_, 0.60);
 
     planning_horizon_ = std::max(0.50, planning_horizon_);
     collision_horizon_ = clampValue(collision_horizon_, 0.10, planning_horizon_);
@@ -173,6 +182,10 @@ void CymPlanner::initialize(
     lookahead_min_ = std::max(path_resolution_, lookahead_min_);
     lookahead_max_ = std::max(lookahead_min_, lookahead_max_);
     lookahead_time_ = std::max(0.0, lookahead_time_);
+    tracking_lateral_kp_ = std::max(0.0, tracking_lateral_kp_);
+    tracking_lateral_kd_ = std::max(0.0, tracking_lateral_kd_);
+    tracking_heading_kp_ = std::max(0.0, tracking_heading_kp_);
+    tracking_heading_kd_ = std::max(0.0, tracking_heading_kd_);
 
     max_vel_x_ = std::max(0.0, max_vel_x_);
     max_vel_theta_ = std::max(0.0, max_vel_theta_);
@@ -217,6 +230,7 @@ void CymPlanner::initialize(
     side_lock_time_ = std::max(0.0, side_lock_time_);
     clear_hold_time_ = std::max(0.0, clear_hold_time_);
     return_time_ = std::max(0.05, return_time_);
+    escape_hold_time_ = clampValue(escape_hold_time_, 0.20, 1.50);
 
     ros::NodeHandle public_nh;
     carry_mode_sub_ = public_nh.subscribe(
@@ -259,6 +273,13 @@ void CymPlanner::initialize(
         weight_side_cost_,
         weight_side_clearance_,
         weight_side_distance_);
+    ROS_INFO(
+        "cym_planner tracking PD | lateral kp/kd=%.2f/%.2f heading kp/kd=%.2f/%.2f | escape hold=%.2fs",
+        tracking_lateral_kp_,
+        tracking_lateral_kd_,
+        tracking_heading_kp_,
+        tracking_heading_kd_,
+        escape_hold_time_);
 }
 
 void CymPlanner::carryModeCallback(const std_msgs::Bool::ConstPtr& message)
@@ -296,6 +317,13 @@ bool CymPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& plan)
     state_enter_time_ = ros::Time::now();
     path_clear_since_ = ros::Time(0);
     no_path_since_ = ros::Time(0);
+    tracking_lateral_error_ = 0.0;
+    tracking_heading_error_ = 0.0;
+    tracking_error_time_ = ros::Time(0);
+    escape_active_until_ = ros::Time(0);
+    escape_target_cmd_ = geometry_msgs::Twist();
+    last_escape_direction_ = 0;
+    last_escape_was_rotation_ = false;
     return_scale_ = 1.0;
     goal_reached_ = false;
     return !global_plan_.empty();
@@ -854,7 +882,7 @@ CymPlanner::CandidatePath CymPlanner::findFirstFeasibleCandidate(
         CandidatePath candidate = generateSeedCandidate(
             reference, collision, side, std::min(magnitude, max_lateral_offset_));
         const CollisionResult candidate_collision =
-            evaluatePathCollision(candidate.points, planning_horizon_);
+            evaluatePathCollision(candidate.points, collision_horizon_);
         if (candidate_collision.collision)
         {
             continue;
@@ -1204,7 +1232,7 @@ bool CymPlanner::selectAvoidancePath(
         if (!locked_candidate.points.empty())
         {
             const CollisionResult locked_collision =
-                evaluatePathCollision(locked_candidate.points, planning_horizon_);
+                evaluatePathCollision(locked_candidate.points, collision_horizon_);
             if (!locked_collision.collision)
             {
                 locked_candidate.valid = true;
@@ -1274,7 +1302,7 @@ bool CymPlanner::selectAvoidancePath(
     refineOffsets(reference, offsets, 0);
     CandidatePath optimized = generatePathFromOffsets(reference, offsets, 0);
     const CollisionResult optimized_collision =
-        evaluatePathCollision(optimized.points, planning_horizon_);
+        evaluatePathCollision(optimized.points, collision_horizon_);
     if (!optimized_collision.collision)
     {
         double signed_offset = 0.0;
@@ -1342,7 +1370,7 @@ bool CymPlanner::selectReturnPath(
     return_scale_ *= std::exp(-dt / return_time_);
     CandidatePath returning = generateReturnCandidate(reference, locked_side_);
     const CollisionResult collision = evaluatePathCollision(
-        returning.points, planning_horizon_);
+        returning.points, collision_horizon_);
     if (collision.collision)
     {
         path_clear_since_ = ros::Time(0);
@@ -1408,7 +1436,7 @@ bool CymPlanner::computeGoalAlignCommand(geometry_msgs::Twist& cmd_vel)
 
 geometry_msgs::Twist CymPlanner::computePurePursuitCommand(
     const geometry_msgs::PoseStamped& robot_pose,
-    const std::vector<PathPoint>& path) const
+    const std::vector<PathPoint>& path)
 {
     geometry_msgs::Twist command;
     if (path.empty())
@@ -1446,13 +1474,43 @@ geometry_msgs::Twist CymPlanner::computePurePursuitCommand(
     const double dy = path[target_index].y - robot_pose.pose.position.y;
     const double target_x = std::cos(robot_yaw) * dx + std::sin(robot_yaw) * dy;
     const double target_y = -std::sin(robot_yaw) * dx + std::cos(robot_yaw) * dy;
-    const double heading_error = std::atan2(target_y, target_x);
+    const double bearing_error = std::atan2(target_y, target_x);
+    const double path_heading_error = angles::shortest_angular_distance(
+        robot_yaw, path[target_index].yaw);
+    const double heading_error = 0.5 * bearing_error +
+        0.5 * path_heading_error;
+
+    const double nearest_dx = path[nearest].x - robot_pose.pose.position.x;
+    const double nearest_dy = path[nearest].y - robot_pose.pose.position.y;
+    const double lateral_error = -std::sin(robot_yaw) * nearest_dx +
+        std::cos(robot_yaw) * nearest_dy;
+    double lateral_error_rate = 0.0;
+    double heading_error_rate = 0.0;
+    if (!tracking_error_time_.isZero())
+    {
+        const double error_dt = clampValue(
+            (ros::Time::now() - tracking_error_time_).toSec(), 0.005, 0.20);
+        lateral_error_rate = (lateral_error - tracking_lateral_error_) / error_dt;
+        heading_error_rate = angles::shortest_angular_distance(
+            tracking_heading_error_, heading_error) / error_dt;
+    }
+    tracking_lateral_error_ = lateral_error;
+    tracking_heading_error_ = heading_error;
+    tracking_error_time_ = ros::Time::now();
 
     const double motion_scale = carry_mode_ ? carry_speed_scale_ : 1.0;
-    if (target_x <= 0.0 || std::abs(heading_error) > 1.10)
+    if (target_x <= 0.0 || std::abs(bearing_error) > 1.10)
     {
+        // Rotate toward the path when the lookahead is not in front.  Include
+        // the lateral term so the vehicle does not wait for a pure heading
+        // alignment before correcting a large cross-track error.
+        const double pd_angular =
+            tracking_lateral_kp_ * lateral_error +
+            tracking_lateral_kd_ * lateral_error_rate +
+            tracking_heading_kp_ * heading_error +
+            tracking_heading_kd_ * heading_error_rate;
         command.angular.z = clampValue(
-            2.0 * heading_error,
+            pd_angular,
             -max_vel_theta_ * motion_scale,
             max_vel_theta_ * motion_scale);
         return command;
@@ -1467,13 +1525,21 @@ geometry_msgs::Twist CymPlanner::computePurePursuitCommand(
     const double goal_speed = std::isfinite(remaining_goal_distance)
         ? std::sqrt(std::max(0.0, 2.0 * dec_lim_x_ * remaining_goal_distance))
         : max_vel_x_;
-    const double heading_scale = std::max(0.20, std::cos(std::abs(heading_error)));
+    const double heading_scale = clampValue(
+        std::cos(std::abs(bearing_error)), 0.35, 1.0);
+    const double lateral_scale = clampValue(
+        1.0 - 0.75 * std::abs(lateral_error), 0.45, 1.0);
 
     command.linear.x = std::min(
         max_vel_x_ * motion_scale,
-        std::min(curve_speed, goal_speed)) * heading_scale;
+        std::min(curve_speed, goal_speed)) * heading_scale * lateral_scale;
+    const double pd_angular =
+        tracking_lateral_kp_ * lateral_error +
+        tracking_lateral_kd_ * lateral_error_rate +
+        tracking_heading_kp_ * heading_error +
+        tracking_heading_kd_ * heading_error_rate;
     command.angular.z = clampValue(
-        command.linear.x * curvature,
+        command.linear.x * curvature + pd_angular,
         -max_vel_theta_ * motion_scale,
         max_vel_theta_ * motion_scale);
     return command;
@@ -1537,27 +1603,70 @@ bool CymPlanner::computeEscapeCommand(
     const double probe_distance = std::max(
         0.45, circumscribed_radius_ + 0.25);
     const double sample_step = std::max(0.025, collision_check_step_);
-    const double probe_speed = 0.08;
+    const double probe_speed = 0.12;
     const double rotation_duration = 1.20;
 
-    // Reverse first: at a tight inner corner the robot's rear usually points
-    // back into the open corridor.  The small turning variants handle cases
-    // where a straight reverse is blocked by the corner geometry.
+    // At a tight inner corner the robot's rear usually points back into the
+    // open corridor.  Do not, however, issue the same reverse command on
+    // every cycle: after an escape, try the opposite translation first so a
+    // blocked robot cannot oscillate forward/backward at one pose.
     struct EscapeArc
     {
         double direction;
         double angular;
     };
-    const std::vector<EscapeArc> arcs = {
-        {-1.0, 0.0},
-        {-1.0, 0.45},
-        {-1.0, -0.45},
-        {1.0, 0.0},
-        {1.0, 0.45},
-        {1.0, -0.45},
-        {0.0, 0.70},
-        {0.0, -0.70},
-    };
+    std::vector<EscapeArc> arcs;
+    if (last_escape_was_rotation_ && last_escape_direction_ < 0)
+    {
+        // A rotation is followed by the opposite translation direction.  This
+        // gives the chassis a chance to change its heading before translating
+        // back through the same corner.
+        arcs = {
+            {1.0, 0.0}, {1.0, 0.45}, {1.0, -0.45},
+            {-1.0, 0.45}, {-1.0, -0.45}, {-1.0, 0.0},
+            {0.0, 0.70}, {0.0, -0.70},
+        };
+    }
+    else if (last_escape_was_rotation_ && last_escape_direction_ > 0)
+    {
+        arcs = {
+            {-1.0, 0.0}, {-1.0, 0.45}, {-1.0, -0.45},
+            {1.0, 0.45}, {1.0, -0.45}, {1.0, 0.0},
+            {0.0, 0.70}, {0.0, -0.70},
+        };
+    }
+    else if (last_escape_was_rotation_)
+    {
+        arcs = {
+            {-1.0, 0.0}, {-1.0, 0.45}, {-1.0, -0.45},
+            {1.0, 0.0}, {1.0, 0.45}, {1.0, -0.45},
+            {0.0, 0.70}, {0.0, -0.70},
+        };
+    }
+    else if (last_escape_direction_ < 0)
+    {
+        arcs = {
+            {0.0, 0.70}, {0.0, -0.70},
+            {1.0, 0.0}, {1.0, 0.45}, {1.0, -0.45},
+            {-1.0, 0.45}, {-1.0, -0.45}, {-1.0, 0.0},
+        };
+    }
+    else if (last_escape_direction_ > 0)
+    {
+        arcs = {
+            {0.0, 0.70}, {0.0, -0.70},
+            {-1.0, 0.0}, {-1.0, 0.45}, {-1.0, -0.45},
+            {1.0, 0.45}, {1.0, -0.45}, {1.0, 0.0},
+        };
+    }
+    else
+    {
+        arcs = {
+            {-1.0, 0.0}, {-1.0, 0.45}, {-1.0, -0.45},
+            {1.0, 0.0}, {1.0, 0.45}, {1.0, -0.45},
+            {0.0, 0.70}, {0.0, -0.70},
+        };
+    }
 
     for (const EscapeArc& arc : arcs)
     {
@@ -1617,9 +1726,45 @@ bool CymPlanner::computeEscapeCommand(
             heading = next_heading;
         }
 
-        const CollisionResult collision = evaluatePathCollision(
-            path, probe_distance);
-        if (collision.collision)
+        // Escape arcs are allowed to start in the inflated edge of a wall.
+        // The live costmap can disagree by one cell between the reference
+        // sweep and this probe: at one cycle the current pose is reported
+        // clear, while the first 2--3 cm of a reverse arc are reported
+        // lethal.  Running the normal path evaluator here rejects exactly
+        // the recovery arc that would leave the corner.  For this bounded
+        // probe, allow a short near-start overlap, require the footprint to
+        // become clear, and reject every collision after that recovery.
+        const double start_escape_distance = std::max(
+            0.20, circumscribed_radius_ + 2.0 * collision_check_step_);
+        bool near_start_collision = false;
+        bool recovered = false;
+        bool arc_valid = true;
+        for (const PathPoint& sample : path)
+        {
+            const bool sample_collision = checkPoseCollision(
+                sample.x, sample.y, sample.yaw);
+            if (!recovered)
+            {
+                if (!sample_collision)
+                {
+                    recovered = !near_start_collision;
+                    continue;
+                }
+                if (sample.s <= start_escape_distance)
+                {
+                    near_start_collision = true;
+                    continue;
+                }
+                arc_valid = false;
+                break;
+            }
+            if (sample_collision)
+            {
+                arc_valid = false;
+                break;
+            }
+        }
+        if (!arc_valid || (near_start_collision && !recovered))
         {
             continue;
         }
@@ -1628,6 +1773,22 @@ bool CymPlanner::computeEscapeCommand(
         target.linear.x = signed_speed;
         target.angular.z = arc.angular;
         escape_path_ = path;
+        escape_target_cmd_ = target;
+        escape_active_until_ = now + ros::Duration(escape_hold_time_);
+        if (arc.direction < -0.5)
+        {
+            last_escape_direction_ = -1;
+            last_escape_was_rotation_ = false;
+        }
+        else if (arc.direction > 0.5)
+        {
+            last_escape_direction_ = 1;
+            last_escape_was_rotation_ = false;
+        }
+        else
+        {
+            last_escape_was_rotation_ = true;
+        }
         cmd_vel = applyAccelerationLimits(target, now);
         ROS_WARN_THROTTLE(
             1.0,
@@ -1674,6 +1835,8 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         return false;
     }
 
+    const ros::Time now = ros::Time::now();
+
     if (goal_reached_)
     {
         return true;
@@ -1691,6 +1854,25 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         publishPlannerState();
         return computeGoalAlignCommand(cmd_vel);
     }
+
+    // Hold a validated escape arc for a short, bounded interval.  Rebuilding
+    // the escape candidate every control cycle made acceleration limiting
+    // alternate between reverse and forward before the robot could leave the
+    // corner.  The arc was already swept-footprint checked; keeping its
+    // command stable lets the platform actually clear the obstacle.
+    if (!escape_active_until_.isZero() &&
+        now < escape_active_until_ &&
+        !escape_path_.empty())
+    {
+        state_ = PlannerState::TRACK;
+        selected_local_path_ = escape_path_;
+        publishDebugPaths({}, selected_local_path_, now);
+        publishPlannerState();
+        cmd_vel = applyAccelerationLimits(escape_target_cmd_, now);
+        return true;
+    }
+    escape_active_until_ = ros::Time(0);
+    escape_target_cmd_ = geometry_msgs::Twist();
 
     const int nearest_index = findNearestGlobalIndex(robot_pose);
     std::vector<PathPoint> cropped_path;
@@ -1754,7 +1936,6 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         return false;
     }
     reference_path.front().yaw = tf2::getYaw(robot_pose.pose.orientation);
-    const ros::Time now = ros::Time::now();
     if (obstacle_distance_field_.empty() ||
         (now - distance_field_time_).toSec() >= distance_field_update_period_)
     {
@@ -1797,7 +1978,7 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         // Before braking into STOPPING, try a bounded swept-footprint escape
         // (reverse is preferred for the inner-corner geometry).
         const double escape_trigger_distance = std::max(
-            0.55, circumscribed_radius_ + 0.10);
+            0.45, circumscribed_radius_ + 0.10);
         if (collision.first_collision_distance <= escape_trigger_distance &&
             computeEscapeCommand(robot_pose, now, cmd_vel))
         {
@@ -1834,6 +2015,8 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     no_path_since_ = ros::Time(0);
     blocked_cycles_ = 0;
     escape_path_.clear();
+    escape_active_until_ = ros::Time(0);
+    escape_target_cmd_ = geometry_msgs::Twist();
     last_collision_poses_.clear();
 
     if (locked_side_ != 0)
@@ -1843,7 +2026,7 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         {
             CandidatePath holding = generateReturnCandidate(reference_path, locked_side_);
             const CollisionResult holding_collision = evaluatePathCollision(
-                holding.points, planning_horizon_);
+                holding.points, collision_horizon_);
             if (holding_collision.collision)
             {
                 // The near reference segment was already checked above and is

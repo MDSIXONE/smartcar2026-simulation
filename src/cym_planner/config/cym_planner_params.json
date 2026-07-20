@@ -18,15 +18,19 @@
         "lookahead_min": 0.20,
         "lookahead_max": 0.65,
         "lookahead_time": 0.80,
+        "tracking_lateral_kp": 1.80,
+        "tracking_lateral_kd": 0.12,
+        "tracking_heading_kp": 1.20,
+        "tracking_heading_kd": 0.08,
 
         # 第一轮实车/仿真测试使用保守速度，确认碰撞预测稳定后再提高
         "max_vel_x": 0.15,
-        "max_vel_theta": 0.80,
+        "max_vel_theta": 1.00,
         "acc_lim_x": 0.45,
         "dec_lim_x": 0.80,
-        "acc_lim_theta": 1.50,
-        "dec_lim_theta": 2.00,
-        "max_lateral_acceleration": 0.50,
+        "acc_lim_theta": 2.20,
+        "dec_lim_theta": 2.80,
+        "max_lateral_acceleration": 0.60,
 
         # 终点停车和朝向对准
         "final_xy_tolerance": 0.05,
@@ -66,6 +70,7 @@
         "side_lock_time": 1.0,
         "clear_hold_time": 0.5,
         "return_time": 0.80,
+        "escape_hold_time": 1.20,
 
         # 载物模式速度缩放，由 /sim_task3/carry_mode 控制
         "carry_speed_scale": 0.80

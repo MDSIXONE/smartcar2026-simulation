@@ -176,7 +176,7 @@ private:
 
     geometry_msgs::Twist computePurePursuitCommand(
         const geometry_msgs::PoseStamped& robot_pose,
-        const std::vector<PathPoint>& path) const;
+        const std::vector<PathPoint>& path);
 
     geometry_msgs::Twist applyAccelerationLimits(
         const geometry_msgs::Twist& target_cmd,
@@ -262,6 +262,10 @@ private:
     double lookahead_min_ = 0.20;
     double lookahead_max_ = 0.65;
     double lookahead_time_ = 0.80;
+    double tracking_lateral_kp_ = 1.80;
+    double tracking_lateral_kd_ = 0.12;
+    double tracking_heading_kp_ = 1.20;
+    double tracking_heading_kd_ = 0.08;
 
     double max_vel_x_ = 0.15;
     double max_vel_theta_ = 0.80;
@@ -307,6 +311,15 @@ private:
     double side_lock_time_ = 1.0;
     double clear_hold_time_ = 0.5;
     double return_time_ = 0.80;
+    double escape_hold_time_ = 0.60;
+
+    double tracking_lateral_error_ = 0.0;
+    double tracking_heading_error_ = 0.0;
+    ros::Time tracking_error_time_;
+    ros::Time escape_active_until_;
+    geometry_msgs::Twist escape_target_cmd_;
+    int last_escape_direction_ = 0;
+    bool last_escape_was_rotation_ = false;
 
     bool carry_mode_ = false;
     double carry_speed_scale_ = 0.80;
