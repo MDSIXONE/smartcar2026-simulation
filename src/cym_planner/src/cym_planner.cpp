@@ -356,7 +356,11 @@ int CymPlanner::findNearestGlobalIndex(
     }
 
     const int plan_size = static_cast<int>(global_plan_.size());
-    const int begin = std::max(0, std::min(nearest_global_index_, plan_size - 1) - 20);
+    // The local planner is strictly forward-only.  Re-acquiring a point from
+    // behind the monotonic nearest index makes a corner that was already
+    // passed re-enter the local collision horizon and can produce a false
+    // COLLISION after the robot is physically clear of it.
+    const int begin = std::max(0, std::min(nearest_global_index_, plan_size - 1));
     const int end = std::min(plan_size, begin + 220);
 
     double best_distance = std::numeric_limits<double>::infinity();
@@ -1698,6 +1702,38 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         return false;
     }
 
+    // Drop every local-plan sample whose projection is behind the robot.  The
+    // global plan can contain a short backward-looking tail around a sharp
+    // corner, even after nearest-index tracking has advanced.  That tail is
+    // historical geometry: it must not be optimized, collision-checked, or
+    // drawn as the active local path.  A small tolerance keeps the current
+    // sample stable on the costmap grid boundary.
+    const double robot_yaw = tf2::getYaw(robot_pose.pose.orientation);
+    const double robot_cosine = std::cos(robot_yaw);
+    const double robot_sine = std::sin(robot_yaw);
+    const double forward_tolerance = 0.02;
+    std::vector<PathPoint> forward_path;
+    forward_path.reserve(cropped_path.size());
+    for (const PathPoint& point : cropped_path)
+    {
+        const double dx = point.x - robot_pose.pose.position.x;
+        const double dy = point.y - robot_pose.pose.position.y;
+        const double forward_projection = robot_cosine * dx + robot_sine * dy;
+        if (forward_projection >= -forward_tolerance)
+        {
+            forward_path.push_back(point);
+        }
+    }
+    cropped_path.swap(forward_path);
+    if (cropped_path.empty())
+    {
+        PathPoint current_pose;
+        current_pose.x = robot_pose.pose.position.x;
+        current_pose.y = robot_pose.pose.position.y;
+        current_pose.yaw = robot_yaw;
+        cropped_path.push_back(current_pose);
+    }
+
     const double robot_to_path = std::hypot(
         cropped_path.front().x - robot_pose.pose.position.x,
         cropped_path.front().y - robot_pose.pose.position.y);
@@ -1706,7 +1742,7 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         PathPoint current_pose;
         current_pose.x = robot_pose.pose.position.x;
         current_pose.y = robot_pose.pose.position.y;
-        current_pose.yaw = tf2::getYaw(robot_pose.pose.orientation);
+        current_pose.yaw = robot_yaw;
         cropped_path.insert(cropped_path.begin(), current_pose);
         computePathGeometry(cropped_path);
     }

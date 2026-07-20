@@ -127,7 +127,7 @@ Visualization Manager:
     - Class: rviz/MarkerArray
       Enabled: true
       Marker Topic: /cym_planner/predicted_footprints
-      Name: CYM Collision Footprints
+      Name: CYM Front Collision Footprints
       Namespaces:
         collision_footprints: true
       Queue Size: 100
