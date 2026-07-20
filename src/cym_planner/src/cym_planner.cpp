@@ -71,6 +71,76 @@ namespace cym_planner
         lookahead_footprint_pub_.publish(marker);
     }
 
+    void drawLookaheadFootprintOnCostmap(
+        cv::Mat& map_image,
+        costmap_2d::Costmap2D* costmap,
+        const geometry_msgs::PoseStamped& lookahead_pose)
+    {
+        const std::vector<geometry_msgs::Point>& footprint =
+            costmap_ros_->getRobotFootprint();
+        if(footprint.empty())
+        {
+            return;
+        }
+
+        const double yaw = tf::getYaw(lookahead_pose.pose.orientation);
+        const double cos_yaw = std::cos(yaw);
+        const double sin_yaw = std::sin(yaw);
+        std::vector<cv::Point> contour;
+        for(const geometry_msgs::Point& point : footprint)
+        {
+            const double world_x = lookahead_pose.pose.position.x
+                + cos_yaw * point.x - sin_yaw * point.y;
+            const double world_y = lookahead_pose.pose.position.y
+                + sin_yaw * point.x + cos_yaw * point.y;
+            unsigned int map_x = 0;
+            unsigned int map_y = 0;
+            if(costmap->worldToMap(world_x, world_y, map_x, map_y))
+            {
+                contour.push_back(cv::Point(map_x, map_y));
+            }
+        }
+
+        if(contour.size() >= 2)
+        {
+            cv::polylines(map_image, contour, true, cv::Scalar(255, 255, 0), 1);
+        }
+    }
+
+    void drawLookaheadFootprintOnPlan(
+        cv::Mat& plane_image,
+        const geometry_msgs::PoseStamped& lookahead_pose_base)
+    {
+        const std::vector<geometry_msgs::Point>& footprint =
+            costmap_ros_->getRobotFootprint();
+        if(footprint.empty())
+        {
+            return;
+        }
+
+        const double yaw = tf::getYaw(lookahead_pose_base.pose.orientation);
+        const double cos_yaw = std::cos(yaw);
+        const double sin_yaw = std::sin(yaw);
+        std::vector<cv::Point> contour;
+        for(const geometry_msgs::Point& point : footprint)
+        {
+            const double base_x = lookahead_pose_base.pose.position.x
+                + cos_yaw * point.x - sin_yaw * point.y;
+            const double base_y = lookahead_pose_base.pose.position.y
+                + sin_yaw * point.x + cos_yaw * point.y;
+            contour.push_back(cv::Point(
+                static_cast<int>(std::lround(300.0 - base_x * 100.0)),
+                static_cast<int>(std::lround(300.0 - base_y * 100.0))));
+        }
+
+        if(contour.size() >= 2)
+        {
+            cv::polylines(plane_image, contour, true, cv::Scalar(255, 255, 0), 2);
+            cv::putText(plane_image, "lookahead footprint", contour.front(),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.35, cv::Scalar(255, 255, 0), 1);
+        }
+    }
+
     void CymPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap_2d::Costmap2DROS* costmap_ros)
     {
         ROS_WARN("%s", u8"\u8be5\u6211\u4e0a\u573a\u8868\u6f14\u4e86!");
@@ -108,7 +178,7 @@ namespace cym_planner
         if(!planner_nh.getParam("heading_tolerance", heading_tolerance_))
             legacy_nh.param("heading_tolerance", heading_tolerance_, 0.20);
         if(!planner_nh.getParam("obstacle_lookahead_distance", obstacle_lookahead_distance_))
-            legacy_nh.param("obstacle_lookahead_distance", obstacle_lookahead_distance_, 0.36);
+            legacy_nh.param("obstacle_lookahead_distance", obstacle_lookahead_distance_, 0.30);
         if(!planner_nh.getParam("obstacle_cost_threshold", obstacle_cost_threshold_))
             legacy_nh.param("obstacle_cost_threshold", obstacle_cost_threshold_, 253);
         if(!planner_nh.getParam("carry_speed_scale", carry_speed_scale_))
@@ -125,7 +195,7 @@ namespace cym_planner
         carry_mode_sub_ = public_nh.subscribe(
             "/sim_task3/carry_mode", 1, &CymPlanner::carryModeCallback, this);
         lookahead_footprint_pub_ = planner_nh.advertise<visualization_msgs::Marker>(
-            "lookahead_footprint", 1);
+            "lookahead_footprint", 1, true);
         previous_linear_error_ = 0.0;
         previous_control_time_ = ros::Time(0);
         linear_derivative_initialized_ = false;
@@ -206,6 +276,8 @@ namespace cym_planner
         bool have_previous_point = false;
         geometry_msgs::PoseStamped lookahead_pose;
         bool have_lookahead_pose = false;
+        bool lookahead_blocked = false;
+        unsigned char blocking_cost = 0;
 
         // Draw the plan and reject a blocked segment ahead of the robot.  Returning
         // false intentionally delegates detour planning to move_base/global_planner.
@@ -260,18 +332,16 @@ namespace cym_planner
             const unsigned char cost = costmap->getCost(x, y);
             if(cost >= obstacle_cost_threshold_)
             {
-                publishLookaheadFootprint(lookahead_pose, costmap_frame);
-                ROS_WARN_THROTTLE(1.0,
-                                  "cym_planner: blocked path segment, cost=%u threshold=%d; requesting global replan",
-                                  static_cast<unsigned int>(cost), obstacle_cost_threshold_);
-                cmd_vel = geometry_msgs::Twist();
-                return false;
+                lookahead_blocked = true;
+                blocking_cost = cost;
+                break;
             }
         }
 
         if(have_lookahead_pose)
         {
             publishLookaheadFootprint(lookahead_pose, costmap_frame);
+            drawLookaheadFootprintOnCostmap(map_image, costmap, lookahead_pose);
         }
 
 
@@ -305,6 +375,15 @@ namespace cym_planner
         cv::resize(map_image, map_image, cv::Size(size_x*5, size_y*5),0,0,cv::INTER_NEAREST);
         cv::resizeWindow("Map", size_x*5, size_y*5);
         cv::imshow("Map", map_image);
+
+        if(lookahead_blocked)
+        {
+            ROS_WARN_THROTTLE(1.0,
+                              "cym_planner: blocked path segment, cost=%u threshold=%d; requesting global replan",
+                              static_cast<unsigned int>(blocking_cost), obstacle_cost_threshold_);
+            cmd_vel = geometry_msgs::Twist();
+            return false;
+        }
         
 
 
@@ -429,8 +508,25 @@ namespace cym_planner
         cv::circle(plane_image, cv::Point(300, 300), 15, cv::Scalar(0, 255, 0));
         cv::line(plane_image, cv::Point(65, 300), cv::Point(510, 300), cv::Scalar(0, 255, 0),1);
         cv::line(plane_image, cv::Point(300, 45), cv::Point(300, 555), cv::Scalar(0, 255, 0),1);
-        //cv::namedWindow("Plan");
-        //cv::imshow("Plan", plane_image);
+        if(have_lookahead_pose)
+        {
+            geometry_msgs::PoseStamped lookahead_pose_base;
+            lookahead_pose.header.stamp = ros::Time(0);
+            try
+            {
+                tf_listener_->transformPose(base_link_frame_, lookahead_pose,
+                                            lookahead_pose_base);
+                drawLookaheadFootprintOnPlan(plane_image, lookahead_pose_base);
+            }
+            catch(tf::TransformException& ex)
+            {
+                ROS_WARN_THROTTLE(1.0,
+                                  "cym_planner: cannot transform lookahead footprint into %s: %s",
+                                  base_link_frame_.c_str(), ex.what());
+            }
+        }
+        cv::namedWindow("Plan");
+        cv::imshow("Plan", plane_image);
         cv::waitKey(1);
         return true;
     }

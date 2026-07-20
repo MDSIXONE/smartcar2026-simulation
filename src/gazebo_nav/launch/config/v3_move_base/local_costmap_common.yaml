@@ -1,4 +1,6 @@
-footprint: [[0.18, -0.12], [0.18, 0.12], [-0.18, 0.12], [-0.18, -0.12]]
+# Keep the local collision model compact enough for the narrow simulated lanes.
+# The global costmap retains its larger safety footprint for route planning.
+footprint: [[0.15, -0.10], [0.15, 0.10], [-0.15, 0.10], [-0.15, -0.10]]
 footprint_padding: 0.0
 transform_tolerance: 0.3
 

@@ -56,8 +56,9 @@ Cym Planner Lookahead Footprint
 生成全局路径后，会在前视检查路径的末端显示一个青色矩形轮廓：
 
 - 话题：`/move_base/CymPlanner/lookahead_footprint`
-- 尺寸：直接读取 local costmap footprint，默认 `0.36 m × 0.24 m`
+- 尺寸：直接读取 local costmap footprint，默认 `0.30 m × 0.20 m`
 - 朝向：跟随该路径点朝向
+- 显示：最后一次有效的 Marker 会锁存在 RViz 中，便于检查高速导航后的前视位置
 
 没有导航目标时该轮廓不会发布，这是正常现象。可在另一个终端确认发布端：
 
@@ -68,6 +69,10 @@ rostopic info /move_base/CymPlanner/lookahead_footprint
 ```
 
 输出中应有一个 publisher，节点为 `/move_base`。
+
+同时会弹出两个 OpenCV 调试窗口：`Map` 显示局部代价地图中的同一青色
+footprint，`Plan` 显示车体坐标系中的路径和前视 footprint。它们同样只会在
+产生导航路径后更新。
 
 ## 4. 终端 B：运行完整取放任务（可选）
 

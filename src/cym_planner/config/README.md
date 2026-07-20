@@ -76,8 +76,8 @@ base_footprint──> base_link
 ## 前视碰撞检查
 
 `obstacle_lookahead_distance` 控制沿全局路径向前检查障碍的距离。默认值为
-`0.36 m`，与 local costmap 中小车 footprint 的前后尺寸（`-0.18 m` 至
-`0.18 m`）一致。
+`0.30 m`，与 local costmap 中小车 footprint 的前后尺寸（`-0.15 m` 至
+`0.15 m`）一致。
 
 当前路径点的 cost 大于或等于 `obstacle_cost_threshold` 时，规划器会将
 `cmd_vel` 清零并返回 `false`，由 `move_base` 请求全局重规划；该触障行为

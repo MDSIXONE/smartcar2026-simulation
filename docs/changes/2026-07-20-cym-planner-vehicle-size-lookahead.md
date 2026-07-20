@@ -3,8 +3,8 @@
 ## 变更
 
 `CymPlanner` 的 `obstacle_lookahead_distance` 默认值由 `0.8 m` 调整为
-`0.36 m`。该距离与 local costmap 的小车 footprint 前后尺寸一致：
-`x = -0.18 m` 至 `x = 0.18 m`。
+`0.30 m`。该距离与 local costmap 的小车 footprint 前后尺寸一致：
+`x = -0.15 m` 至 `x = 0.15 m`。
 
 代码中的 ROS 参数缺省值与
 `src/cym_planner/config/cym_planner_params.json` 保持一致，未提供该参数时
@@ -15,7 +15,7 @@
 `CymPlanner` 会在前视检查实际覆盖的路径末端发布
 `/move_base/CymPlanner/lookahead_footprint`。Marker 直接使用 local costmap
 当前的 footprint 顶点，因此显示尺寸与碰撞检查使用的车体尺寸一致（默认
-`0.36 m × 0.24 m`），并会跟随该路径点的朝向。`v3_cym_nav.rviz` 已默认
+`0.30 m × 0.20 m`），并会跟随该路径点的朝向。`v3_cym_nav.rviz` 已默认
 启用 **Cym Planner Lookahead Footprint** 显示项。
 
 ## 触障行为
