@@ -5,6 +5,7 @@
 #include <tf/tf.h>
 #include <tf/transform_datatypes.h>
 #include <tf/transform_listener.h>
+#include <visualization_msgs/Marker.h>
 
 PLUGINLIB_EXPORT_CLASS(cym_planner::CymPlanner, nav_core::BaseLocalPlanner)
 
@@ -39,6 +40,37 @@ namespace cym_planner
     double previous_linear_error_;
     ros::Time previous_control_time_;
     bool linear_derivative_initialized_;
+    ros::Publisher lookahead_footprint_pub_;
+
+    void publishLookaheadFootprint(const geometry_msgs::PoseStamped& lookahead_pose,
+                                   const std::string& costmap_frame)
+    {
+        const std::vector<geometry_msgs::Point>& footprint =
+            costmap_ros_->getRobotFootprint();
+        if(footprint.empty())
+        {
+            return;
+        }
+
+        visualization_msgs::Marker marker;
+        marker.header.frame_id = costmap_frame;
+        marker.header.stamp = ros::Time::now();
+        marker.ns = "cym_planner";
+        marker.id = 0;
+        marker.type = visualization_msgs::Marker::LINE_STRIP;
+        marker.action = visualization_msgs::Marker::ADD;
+        marker.pose = lookahead_pose.pose;
+        marker.pose.position.z += 0.03;
+        marker.scale.x = 0.025;
+        marker.color.r = 0.05;
+        marker.color.g = 0.95;
+        marker.color.b = 0.95;
+        marker.color.a = 1.0;
+        marker.points = footprint;
+        marker.points.push_back(footprint.front());
+        lookahead_footprint_pub_.publish(marker);
+    }
+
     void CymPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap_2d::Costmap2DROS* costmap_ros)
     {
         ROS_WARN("%s", u8"\u8be5\u6211\u4e0a\u573a\u8868\u6f14\u4e86!");
@@ -76,7 +108,7 @@ namespace cym_planner
         if(!planner_nh.getParam("heading_tolerance", heading_tolerance_))
             legacy_nh.param("heading_tolerance", heading_tolerance_, 0.20);
         if(!planner_nh.getParam("obstacle_lookahead_distance", obstacle_lookahead_distance_))
-            legacy_nh.param("obstacle_lookahead_distance", obstacle_lookahead_distance_, 0.8);
+            legacy_nh.param("obstacle_lookahead_distance", obstacle_lookahead_distance_, 0.36);
         if(!planner_nh.getParam("obstacle_cost_threshold", obstacle_cost_threshold_))
             legacy_nh.param("obstacle_cost_threshold", obstacle_cost_threshold_, 253);
         if(!planner_nh.getParam("carry_speed_scale", carry_speed_scale_))
@@ -92,6 +124,8 @@ namespace cym_planner
         ros::NodeHandle public_nh;
         carry_mode_sub_ = public_nh.subscribe(
             "/sim_task3/carry_mode", 1, &CymPlanner::carryModeCallback, this);
+        lookahead_footprint_pub_ = planner_nh.advertise<visualization_msgs::Marker>(
+            "lookahead_footprint", 1);
         previous_linear_error_ = 0.0;
         previous_control_time_ = ros::Time(0);
         linear_derivative_initialized_ = false;
@@ -170,6 +204,8 @@ namespace cym_planner
         double previous_x = 0.0;
         double previous_y = 0.0;
         bool have_previous_point = false;
+        geometry_msgs::PoseStamped lookahead_pose;
+        bool have_lookahead_pose = false;
 
         // Draw the plan and reject a blocked segment ahead of the robot.  Returning
         // false intentionally delegates detour planning to move_base/global_planner.
@@ -218,16 +254,24 @@ namespace cym_planner
                 break;
             }
 
+            lookahead_pose = pose_costmap;
+            have_lookahead_pose = true;
             cv::circle(map_image, cv::Point(x, y), 0, cv::Scalar(0, 0, 255));
             const unsigned char cost = costmap->getCost(x, y);
             if(cost >= obstacle_cost_threshold_)
             {
+                publishLookaheadFootprint(lookahead_pose, costmap_frame);
                 ROS_WARN_THROTTLE(1.0,
                                   "cym_planner: blocked path segment, cost=%u threshold=%d; requesting global replan",
                                   static_cast<unsigned int>(cost), obstacle_cost_threshold_);
                 cmd_vel = geometry_msgs::Twist();
                 return false;
             }
+        }
+
+        if(have_lookahead_pose)
+        {
+            publishLookaheadFootprint(lookahead_pose, costmap_frame);
         }
 
 

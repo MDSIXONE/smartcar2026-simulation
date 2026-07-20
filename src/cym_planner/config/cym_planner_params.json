@@ -58,8 +58,8 @@
         # 局部轨迹模拟步长，单位秒
         "simulation_step": 0.05,
 
-        # 沿全局路径向前检查的实际距离，单位 m；命中障碍后请求 move_base 重规划
-        "obstacle_lookahead_distance": 0.8,
+        # 沿全局路径向前检查的实际距离，单位 m；0.36 m 与小车车长一致，命中障碍后请求 move_base 重规划
+        "obstacle_lookahead_distance": 0.36,
 
         # 253 覆盖膨胀区，254 为致命障碍；代码按 cost >= 此值判定
         "obstacle_cost_threshold": 253
