@@ -13,11 +13,11 @@
         "scan_topic": "/scan",
 
         # 超过该时长未收到新的激光数据，局部控制器必须输出零速度。
-        "scan_timeout": 0.25,
+        "scan_timeout": 0.4,
 
         # 参与局部决策的有效激光范围，单位 m。
         "scan_min_range": 0.03,
-        "scan_max_range": 4.0,
+        "scan_max_range": 3.0,
 
         # 车体外扩安全距离、制动减速度和控制反应时间。
         # 候选速度的停车距离为 v^2/(2a) + v*t + safety_margin。
@@ -29,7 +29,7 @@
         "lookahead_distance": 0.5,
 
         # 前进速度增益：前方路径点距离乘以该值，决定提速快慢
-        "linear_x_gain": 10.0,
+        "linear_x_gain": 5.0,
 
         # 当前禁止横向平移，此参数暂不参与车辆控制
         "linear_y_gain": 5.0,
@@ -38,13 +38,13 @@
         "angular_gain": 14.0,
 
         # 最大前进速度，单位 m/s
-        "max_vel_x": 14.0,
+        "max_vel_x": 6.0,
 
         # 当前禁止横向平移，此参数暂不参与车辆控制
         "max_vel_y": 15.0,
 
         # 最大旋转速度，单位 rad/s
-        "max_vel_theta": 20.5,
+        "max_vel_theta": 15.5,
 
         # 到达路径终点后的独立朝向对准参数。
         # final_yaw_gain 越大，终点旋转越快；建议 1.5 ~ 3.0。

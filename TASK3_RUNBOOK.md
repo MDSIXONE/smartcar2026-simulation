@@ -163,8 +163,8 @@ roslaunch car3 task3_execute.launch cargo_category:=electronics cargo_name:="耳
 
 | 控制量 | 原上限 | 载物上限 |
 | --- | ---: | ---: |
-| 前进速度 | `14.0` | `11.2` |
-| 转向速度 | `20.5` | `16.4` |
+| 前进速度 | `6.0` | `4.8` |
+| 转向速度 | `15.5` | `12.4` |
 | 终点朝向速度 | `10.2` | `8.16` |
 
 速度倍率位于：
@@ -221,7 +221,7 @@ rostopic hz /scan
 rostopic echo -n 1 /move_base/CymPlanner/laser_points
 ```
 
-`/scan` 的频率应稳定高于控制器要求；当前仿真激光雷达为 15 Hz，`scan_timeout` 默认是 0.25 秒。相关安全距离、制动模型、采样数和评分权重都位于：
+`/scan` 的频率应稳定高于控制器要求；当前仿真激光雷达为 15 Hz，`scan_timeout` 默认是 0.4 秒。相关安全距离、制动模型、采样数和评分权重都位于：
 
 ```text
 src/cym_planner/config/cym_planner_params.json
