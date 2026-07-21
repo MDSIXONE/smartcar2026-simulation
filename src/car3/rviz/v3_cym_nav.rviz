@@ -107,6 +107,13 @@ Visualization Manager:
       Name: MoveBase Goal
       Topic: /move_base/current_goal
       Value: true
+    - Class: rviz/Image
+      Enabled: true
+      Image Topic: /camera/rgb/image_raw
+      Name: RGB Camera
+      Queue Size: 2
+      Transport Hint: raw
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
