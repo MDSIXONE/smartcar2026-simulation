@@ -1,0 +1,21 @@
+<launch>
+  <arg name="darknet_dir" default="$(env HOME)/smartcar2026-models/darknet-yolov3"/>
+  <arg name="camera_topic" default="/camera/rgb/image_raw"/>
+  <arg name="threshold" default="0.25"/>
+  <arg name="inference_rate" default="2.0"/>
+
+  <!-- The detector is observational: it publishes camera detections but does
+       not send navigation goals or commands to the arm or base. -->
+  <node name="yolo_detector" pkg="car3" type="yolo_detector.py" output="screen">
+    <param name="darknet_dir" value="$(arg darknet_dir)"/>
+    <param name="camera_topic" value="$(arg camera_topic)"/>
+    <param name="threshold" value="$(arg threshold)"/>
+    <param name="inference_rate" value="$(arg inference_rate)"/>
+    <param name="binary" value="yolo_pipe"/>
+    <param name="config" value="cfg/yolov3-tiny-3cls.cfg"/>
+    <param name="weights" value="models/yolov3-tiny-3cls_best.weights"/>
+    <param name="names" value="data/obj.names"/>
+    <param name="detections_topic" value="/sim_task3/yolo/detections"/>
+    <param name="status_topic" value="/sim_task3/yolo/status"/>
+  </node>
+</launch>

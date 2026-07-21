@@ -42,6 +42,9 @@ RViz 观察点和完整取放任务的命令。
 使用车载 RGB 相机采集随机物块的 YOLO 图像和标签，请见
 [YOLO 数据采集](docs/YOLO_DATASET_CAPTURE.md)。
 
+使用本机训练的 YOLOv3-tiny 模型在仿真 RGB 相机上进行并行检测，请见
+[WSL YOLOv3 运行与完整任务检查](docs/LOCAL_WSL_20.04.md#run-the-camera-and-yolov3-during-a-complete-task)。
+
 ## WSL Ubuntu 20.04 deployment
 
 For a reproducible local WSL setup, ROS Master environment, Gazebo startup,

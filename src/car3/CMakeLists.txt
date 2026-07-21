@@ -25,6 +25,7 @@ catkin_install_python(PROGRAMS
   scripts/set_arm_initial_pose.py
   scripts/task3_pick_deliver.py
   scripts/capture_cube_dataset.py
+  scripts/yolo_detector.py
   scripts/spawn_cubes.py
   scripts/odom_tf_broadcaster.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}

@@ -4,6 +4,9 @@
        shake. -->
   <arg name="gui" default="true"/>
   <arg name="rviz" default="true"/>
+  <arg name="enable_yolo" default="false"/>
+  <arg name="darknet_dir" default="$(env HOME)/smartcar2026-models/darknet-yolov3"/>
+  <arg name="yolo_inference_rate" default="2.0"/>
   <arg name="arm_start_pose" default="-0.0001,-0.4999,1.2800,1.7000,0.0000"/>
 
   <include file="$(find car3)/launch/v3_cym_gazebo.launch">
@@ -20,5 +23,10 @@
     <!-- Reapply only through Gazebo while driving.  This is not a running
          arm controller; it prevents unpowered joints 3/4 from drifting. -->
     <arg name="hold_initial_arm_pose" value="true"/>
+  </include>
+
+  <include if="$(arg enable_yolo)" file="$(find car3)/launch/yolo_detector.launch">
+    <arg name="darknet_dir" value="$(arg darknet_dir)"/>
+    <arg name="inference_rate" value="$(arg yolo_inference_rate)"/>
   </include>
 </launch>
