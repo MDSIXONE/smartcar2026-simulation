@@ -9,7 +9,7 @@
 5. 切换到携带姿态，保持夹爪关闭，低速通过有障碍物的加工区；
 6. 抵达对应加工车间后发布完成状态。
 
-> 不要同时运行旧的 `v3_cym_gazebo.launch`、旧任务节点和下面的准备命令。两个 Gazebo/控制器启动器会相互冲突，导致机械臂控制器无法启动。
+> 不要同时运行独立的 `gazebo.launch`、其他任务节点和下面的准备命令。两个 Gazebo/控制器启动器会相互冲突，导致机械臂控制器无法启动。
 
 ## 0. 每个终端的环境
 
@@ -262,7 +262,7 @@ rostopic echo -n 1 /sim_task3/arm_initial_pose_ready
 rosservice call /controller_manager/list_controllers
 ```
 
-准备阶段必须是 `arm_initial_pose_ready=True` 且两个机械臂控制器均为 `stopped`。不要用旧 `v3_cym_gazebo.launch` 与准备启动器并行启动。
+准备阶段必须是 `arm_initial_pose_ready=True` 且两个机械臂控制器均为 `stopped`。不要用独立的 `gazebo.launch` 与准备启动器并行启动。
 
 ### 车辆已经到夹取点但任务退出
 

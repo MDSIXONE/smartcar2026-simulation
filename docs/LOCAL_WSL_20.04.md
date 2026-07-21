@@ -26,7 +26,7 @@ git clone https://github.com/MDSIXONE/smartcar2026-simulation.git \
 cd ~/smartcar2026-simulation
 find src -type f -name '*.py' -exec dos2unix {} \;
 find src/car3/scripts -type f -name '*.py' -exec chmod +x {} \;
-chmod +x start_v3_clean.sh
+chmod +x start_sim_clean.sh
 
 source /opt/ros/noetic/setup.bash
 export ROS_MASTER_URI=http://192.168.8.197:11311

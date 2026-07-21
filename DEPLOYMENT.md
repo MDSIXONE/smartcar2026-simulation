@@ -18,7 +18,7 @@ source devel/setup.bash
 
 ```bash
 cd ~/smartcar2026-simulation
-chmod +x start_v3_clean.sh
+chmod +x start_sim_clean.sh
 find src/car3/scripts -type f -name '*.py' -exec chmod +x {} +
 ```
 
@@ -42,10 +42,10 @@ roslaunch car3 task3_execute.launch cargo_item:="苹果"
 
 ## 4. 可选清理启动脚本
 
-`start_v3_clean.sh` 会先停止本机现有的 Gazebo、RViz、move_base 与 roslaunch 进程，再启动基础 Gazebo 环境。仅在确认这些进程都可关闭时运行：
+`start_sim_clean.sh` 会先停止本机现有的 Gazebo、RViz、move_base 与 roslaunch 进程，再启动基础 Gazebo 环境。仅在确认这些进程都可关闭时运行：
 
 ```bash
-./start_v3_clean.sh
+./start_sim_clean.sh
 ```
 
 常规任务运行优先使用上面的 `task3_prepare.launch` / `task3_execute.launch` 两阶段命令。

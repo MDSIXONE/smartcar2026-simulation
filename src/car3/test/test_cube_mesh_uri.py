@@ -8,7 +8,7 @@ from xml.etree import ElementTree
 
 PACKAGE_DIR = Path(__file__).resolve().parents[1]
 CUBE_DIR = PACKAGE_DIR / "models" / "cube"
-GAZEBO_LAUNCH = PACKAGE_DIR / "launch" / "v3_cym_gazebo.launch"
+GAZEBO_LAUNCH = PACKAGE_DIR / "launch" / "gazebo.launch"
 
 
 class CubeMeshUriTest(unittest.TestCase):

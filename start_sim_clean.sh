@@ -25,4 +25,4 @@ source /opt/ros/noetic/setup.bash
 source "$WORKSPACE_DIR/devel/setup.bash"
 export DISPLAY=:0
 export DISABLE_ROS1_EOL_WARNINGS=1
-exec roslaunch car3 v3_cym_gazebo.launch "$@"
+exec roslaunch car3 gazebo.launch "$@"

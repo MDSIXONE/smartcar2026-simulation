@@ -15,7 +15,7 @@
 `CymPlanner` 会在前视检查实际覆盖的路径末端发布
 `/move_base/CymPlanner/lookahead_footprint`。Marker 直接使用 local costmap
 当前的 footprint 顶点，因此显示尺寸与碰撞检查使用的车体尺寸一致（默认
-`0.30 m × 0.20 m`），并会跟随该路径点的朝向。`v3_cym_nav.rviz` 已默认
+`0.30 m × 0.20 m`），并会跟随该路径点的朝向。`navigation.rviz` 已默认
 启用 **Cym Planner Lookahead Footprint** 显示项。
 
 ## 触障行为

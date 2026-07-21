@@ -1,5 +1,5 @@
 ﻿# CymPlanner 局部规划器参数
-# 修改本文件后不需要重新编译，只需重新运行 ./start_v3_clean.sh
+# 修改本文件后不需要重新编译，只需重新运行 ./start_sim_clean.sh
 {
     "CymPlanner": {
         # 机器人本体坐标系

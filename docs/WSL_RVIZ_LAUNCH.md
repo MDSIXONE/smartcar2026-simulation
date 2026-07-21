@@ -41,12 +41,12 @@ roslaunch car3 task3_prepare.launch gui:=true rviz:=true
 calibrated initial arm pose applied
 ```
 
-不要在该命令运行期间再启动 `v3_cym_gazebo.launch` 或第二个
+不要在该命令运行期间再启动独立的 `gazebo.launch` 或第二个
 `task3_prepare.launch`，否则会重复启动 Gazebo、控制器和 `move_base`。
 
 ## 3. RViz：检查前视车体
 
-RViz 会自动载入 `v3_cym_nav.rviz`。左侧 **Displays** 中应启用：
+RViz 会自动载入 `navigation.rviz`。左侧 **Displays** 中应启用：
 
 ```text
 Cym Planner Lookahead Footprint
@@ -101,5 +101,5 @@ rostopic echo /sim_task3/status
 立即重新启动完整 Gazebo 与 RViz：
 
 ```bash
-./start_v3_clean.sh gui:=true rviz:=true
+./start_sim_clean.sh gui:=true rviz:=true
 ```

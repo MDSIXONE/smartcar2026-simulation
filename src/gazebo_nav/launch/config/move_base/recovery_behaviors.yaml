@@ -1,4 +1,4 @@
-# 本文件由 v3_cym_nav.launch 直接加载到 /move_base 下。
+# 本文件由 gazebo_nav.launch 直接加载到 /move_base 下。
 # 不能放到 global_costmap 命名空间中：move_base 只会从自身私有命名空间读取
 # recovery_behaviors 及其每个同名行为参数。
 

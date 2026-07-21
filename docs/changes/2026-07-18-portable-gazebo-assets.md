@@ -9,7 +9,7 @@ workspace instead of relying on the original developer's absolute path.
 
 - Cube visual URIs in `src/car3/models/cube/model_0.sdf` through
   `model_2.sdf` now use `model://cube/meshes/...`.
-- `src/car3/launch/v3_cym_gazebo.launch` sets `GAZEBO_MODEL_PATH` before
+- `src/car3/launch/gazebo.launch` sets `GAZEBO_MODEL_PATH` before
   Gazebo starts, so `gzserver` receives the project model directory.
 - Wall labels in `src/car3/world/math.world` now use
   `model://sign/meshes/...`.
