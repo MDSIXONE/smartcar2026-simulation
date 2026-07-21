@@ -27,13 +27,23 @@ find src/car3/scripts -type f -name '*.py' -exec chmod +x {} +
 
 ## 3. 两阶段启动
 
+每个终端都在工作区根目录设置同一个本机 ROS Master，避免任务终端连接到
+其他 ROS 环境：
+
+```bash
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+export ROS_MASTER_URI=http://127.0.0.1:11312
+unset ROS_IP ROS_HOSTNAME
+```
+
 先启动环境并等待机械臂平滑到初始姿态完成：
 
 ```bash
 roslaunch car3 task3_prepare.launch gui:=true rviz:=true
 ```
 
-再在另一个已 `source devel/setup.bash` 的终端执行任务：
+再在另一个完成相同环境设置的终端执行任务：
 
 ```bash
 roslaunch car3 task3_execute.launch cargo_item:="苹果"

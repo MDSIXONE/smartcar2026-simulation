@@ -18,7 +18,12 @@
 ```bash
 source /opt/ros/noetic/setup.bash
 source devel/setup.bash
+export ROS_MASTER_URI=http://127.0.0.1:11312
+unset ROS_IP ROS_HOSTNAME
 ```
+
+所有终端都必须使用相同的 `ROS_MASTER_URI`；否则任务节点无法看到 Gazebo、
+`move_base` 和仿真传感器话题。
 
 若上一次仿真异常退出、还有旧节点残留，先执行：
 
