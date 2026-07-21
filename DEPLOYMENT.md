@@ -7,8 +7,9 @@
 ## 2. 构建工作区
 
 ```bash
-git clone https://github.com/MDSIXONE/smartcar2026-simulation.git ~/smartcar2026-simulation
-cd ~/smartcar2026-simulation
+# 在准备放置工作区的父目录执行
+git clone https://github.com/MDSIXONE/smartcar2026-simulation.git smartcar2026-simulation
+cd smartcar2026-simulation
 source /opt/ros/noetic/setup.bash
 catkin_make
 source devel/setup.bash
@@ -17,7 +18,7 @@ source devel/setup.bash
 如通过 ZIP 安装，解压后先恢复 ROS 节点脚本的可执行权限，再执行同样的构建命令：
 
 ```bash
-cd ~/smartcar2026-simulation
+# 在工作区根目录执行
 chmod +x start_sim_clean.sh
 find src/car3/scripts -type f -name '*.py' -exec chmod +x {} +
 ```

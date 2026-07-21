@@ -1,6 +1,6 @@
 # SmartCar Task 3 操作指令
 
-本说明对应 `/home/car/gazebo_ws_v3_local` 的当前代码。任务流程为：
+本说明对应当前工作区根目录中的代码。任务流程为：
 
 1. 启动 Gazebo 与导航，并把机械臂停在已标定的初始姿态；
 2. 在另一个终端输入物品任务；
@@ -13,10 +13,9 @@
 
 ## 0. 每个终端的环境
 
-在 WSL Ubuntu-20.04 中打开终端，执行：
+在 WSL Ubuntu-20.04 中打开终端，切换到工作区根目录后执行：
 
 ```bash
-cd ~/gazebo_ws_v3_local
 source /opt/ros/noetic/setup.bash
 source devel/setup.bash
 ```
@@ -173,7 +172,7 @@ carry_speed_scale: 0.80
 修改该 C++ 规划器或该配置后，重新编译并重启仿真：
 
 ```bash
-cd ~/gazebo_ws_v3_local
+# 在工作区根目录执行
 source /opt/ros/noetic/setup.bash
 catkin_make --pkg cym_planner -j1
 source devel/setup.bash
@@ -245,10 +244,11 @@ q                   退出
 python3 "$(rospack find car3)/scripts/keyboard_drive.py"
 ```
 
-`p` 会把当前车位保存到：
+`p` 默认将当前车位保存到当前用户的 ROS 配置目录。若需要保存在工作区根目录，可传入相对路径：
 
-```text
-/home/car/.ros/car3_saved_pose.yaml
+```bash
+python3 "$(rospack find car3)/scripts/keyboard_drive.py" \
+  _pose_save_path:=./car3_saved_pose.yaml
 ```
 
 ## 7. 常见故障

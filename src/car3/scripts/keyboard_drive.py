@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Safe terminal keyboard teleoperation for the car base only."""
 
+import os
 import select
 import sys
 import termios
@@ -22,9 +23,10 @@ class KeyboardDrive:
         self.angular_speed = float(rospy.get_param("~angular_speed", 0.55))
         self.deadman_timeout = float(rospy.get_param("~deadman_timeout", 0.35))
         self.model_name = rospy.get_param("~model_name", "car3")
-        self.pose_save_path = rospy.get_param(
-            "~pose_save_path", "/home/car/.ros/car3_saved_pose.yaml"
+        default_pose_save_path = os.path.join(
+            os.path.expanduser("~"), ".ros", "car3_saved_pose.yaml"
         )
+        self.pose_save_path = rospy.get_param("~pose_save_path", default_pose_save_path)
         self.publisher = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
         self.pose_pub = rospy.Publisher(
             "/sim_task3/saved_car_pose", String, queue_size=1, latch=True
@@ -79,6 +81,8 @@ class KeyboardDrive:
             "yaw": round(yaw, 4),
         }
         try:
+            output_directory = os.path.dirname(os.path.abspath(self.pose_save_path))
+            os.makedirs(output_directory, exist_ok=True)
             with open(self.pose_save_path, "w", encoding="utf-8") as output:
                 yaml.safe_dump(pose, output, allow_unicode=True, sort_keys=False)
         except OSError as error:
