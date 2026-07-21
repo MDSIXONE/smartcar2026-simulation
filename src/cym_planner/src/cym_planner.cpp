@@ -741,45 +741,96 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         }
     }
 
-    publishTrajectoryDebug(candidates, selected_index);
     if(selected_index < 0)
     {
+        publishTrajectoryDebug(candidates, selected_index);
         publishSafetyState("STOP: laser point cloud rejects every local trajectory");
         ROS_WARN_THROTTLE(1.0,
                           "cym_planner: no collision-free command from direct laser trajectory rollout");
         return false;
     }
 
-    const CandidateTrajectory& selected = candidates[selected_index];
     if(!pose_adjusting_)
     {
-        bool has_safe_forward_trajectory = false;
-        for(const CandidateTrajectory& candidate : candidates)
+        int best_safe_forward_index = -1;
+        int best_goal_directed_turn_index = -1;
+        double best_safe_forward_score = -std::numeric_limits<double>::infinity();
+        double smallest_turn_heading_error = std::numeric_limits<double>::infinity();
+        double best_turn_score = -std::numeric_limits<double>::infinity();
+        const double initial_heading_error = std::abs(normalizeAngle(target_heading));
+
+        for(std::size_t index = 0; index < candidates.size(); ++index)
         {
+            const CandidateTrajectory& candidate = candidates[index];
             if(candidate.valid &&
                candidate.linear_velocity >= minimum_progress_velocity_)
             {
-                has_safe_forward_trajectory = true;
-                break;
+                if(candidate.score > best_safe_forward_score)
+                {
+                    best_safe_forward_score = candidate.score;
+                    best_safe_forward_index = static_cast<int>(index);
+                }
+            }
+
+            // At a pickup bay the global target can be behind the vehicle while
+            // the shelf blocks every *forward* rollout.  That is not a lidar
+            // deadlock: a collision-free turn that reduces the heading error is
+            // the required first step before forward progress becomes possible.
+            // Never accept an arbitrary stationary spin here; it must make a
+            // measurable improvement toward the current global-plan target.
+            if(candidate.valid && !candidate.poses.empty() &&
+               candidate.linear_velocity < minimum_progress_velocity_ &&
+               std::abs(candidate.angular_velocity) >= minimum_turn_velocity_)
+            {
+                const double end_heading_error = std::abs(normalizeAngle(
+                    target_heading - candidate.poses.back().yaw));
+                constexpr double kMinimumHeadingImprovement = 0.01;
+                if(end_heading_error < initial_heading_error - kMinimumHeadingImprovement &&
+                   (end_heading_error < smallest_turn_heading_error ||
+                    (end_heading_error == smallest_turn_heading_error &&
+                     candidate.score > best_turn_score)))
+                {
+                    smallest_turn_heading_error = end_heading_error;
+                    best_turn_score = candidate.score;
+                    best_goal_directed_turn_index = static_cast<int>(index);
+                }
             }
         }
 
+        const CandidateTrajectory& selected = candidates[selected_index];
         const bool selected_command_is_idle =
             selected.linear_velocity < minimum_progress_velocity_ &&
             std::abs(selected.angular_velocity) < minimum_turn_velocity_;
-        if(!has_safe_forward_trajectory || selected_command_is_idle)
+        if(best_safe_forward_index < 0)
         {
-            // A zero Twist is a safety stop, never a navigation success while
-            // the goal is still ahead.  Returning false tells move_base to keep
-            // the action active and obtain a new global path around the dynamic
-            // laser obstacle instead of waiting at the old path forever.
-            publishSafetyState(
-                "BLOCKED: no forward lidar trajectory; requesting global replan");
-            ROS_WARN_THROTTLE(1.0,
-                              "cym_planner: dynamic obstacle blocks local progress; requesting global replan");
-            return false;
+            if(best_goal_directed_turn_index < 0)
+            {
+                // A zero Twist is a safety stop, never a navigation success
+                // while the goal is still ahead.  Returning false tells
+                // move_base to obtain a new global path around the dynamic
+                // laser obstacle instead of waiting at the old path forever.
+                publishTrajectoryDebug(candidates, selected_index);
+                publishSafetyState(
+                    "BLOCKED: no forward lidar trajectory; requesting global replan");
+                ROS_WARN_THROTTLE(1.0,
+                                  "cym_planner: dynamic obstacle blocks local progress; requesting global replan");
+                return false;
+            }
+
+            selected_index = best_goal_directed_turn_index;
+            ROS_INFO_THROTTLE(1.0,
+                              "cym_planner: no forward lidar rollout; rotating toward the global-plan target");
+        }
+        else if(selected_command_is_idle)
+        {
+            // The scorer may tie on an idle command.  If a laser-safe forward
+            // rollout exists, choose it so navigation cannot silently stall.
+            selected_index = best_safe_forward_index;
         }
     }
+
+    publishTrajectoryDebug(candidates, selected_index);
+    const CandidateTrajectory& selected = candidates[selected_index];
 
     // The raw laser point cloud has already generated and selected a safe local
     // command above.  Costmap is deliberately evaluated afterwards as a secondary
