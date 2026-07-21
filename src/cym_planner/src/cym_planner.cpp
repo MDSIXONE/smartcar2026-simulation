@@ -642,12 +642,23 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     if(pose_adjusting_)
     {
         target_pose = final_pose;
-        desired_linear_velocity = clampValue(
-            final_pose.pose.position.x * final_linear_x_gain_ * motion_scale,
-            0.0, max_vel_x_ * motion_scale);
+        // The positional tolerance has already been met.  Keep the vehicle
+        // stationary and let the laser-validated trajectories solve only the
+        // final orientation; advancing here can turn a small pose error into a
+        // large arc around the goal.
+        desired_linear_velocity = 0.0;
+        const double final_yaw_error = tf::getYaw(final_pose.pose.orientation);
+        const double proportional_yaw_velocity =
+            final_yaw_error * final_yaw_gain_ * motion_scale;
+        // A rollout scores its pose at simulation_time_.  Limiting the command
+        // to the angle that can be completed inside that horizon prevents a
+        // high legacy yaw gain from overshooting the terminal orientation.
+        const double horizon_yaw_velocity =
+            final_yaw_error / simulation_time_ * motion_scale;
+        const double yaw_velocity_limit = std::min(
+            final_yaw_max_vel_ * motion_scale, std::abs(horizon_yaw_velocity));
         desired_angular_velocity = clampValue(
-            tf::getYaw(final_pose.pose.orientation) * final_yaw_gain_ * motion_scale,
-            -final_yaw_max_vel_ * motion_scale, final_yaw_max_vel_ * motion_scale);
+            proportional_yaw_velocity, -yaw_velocity_limit, yaw_velocity_limit);
     }
     else
     {
@@ -673,8 +684,14 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     candidates.reserve(static_cast<std::size_t>(v_samples_ * w_samples_));
     int selected_index = -1;
     double best_score = -std::numeric_limits<double>::infinity();
-    const double target_heading = std::atan2(target_pose.pose.position.y,
-                                             target_pose.pose.position.x);
+    // In path-following mode, heading points at the local path target.  Once
+    // position is within tolerance, the target is instead the goal's final
+    // orientation.  Using atan2(y, x) in this branch tends to zero and makes
+    // the scorer prefer w = 0, which is why the previous rollout stopped
+    // turning at the destination.
+    const double target_heading = pose_adjusting_
+        ? tf::getYaw(target_pose.pose.orientation)
+        : std::atan2(target_pose.pose.position.y, target_pose.pose.position.x);
 
     for(int v_index = 0; v_index < v_samples_; ++v_index)
     {
@@ -731,7 +748,7 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     // command above.  Costmap is deliberately evaluated afterwards as a secondary
     // route-level constraint: it may request a new global path, but never replaces
     // laser-based collision checking or velocity selection.
-    if(isCostmapPathBlocked())
+    if(!pose_adjusting_ && isCostmapPathBlocked())
     {
         publishSafetyState("STOP: auxiliary costmap requests global replan");
         return false;
