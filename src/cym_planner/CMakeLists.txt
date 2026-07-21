@@ -2,22 +2,26 @@ cmake_minimum_required(VERSION 3.0.2)
 project(cym_planner)
 
 ## Compile as C++11, supported in ROS Kinetic and newer
-# add_compile_options(-std=c++11)
+add_compile_options(-std=c++11)
 
 ## Find catkin macros and libraries
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
 ## is used, also find other catkin packages
 find_package(catkin REQUIRED COMPONENTS
+  costmap_2d
+  geometry_msgs
   nav_core
   pluginlib
   roscpp
+  sensor_msgs
   std_msgs
+  tf
+  tf2_ros
   visualization_msgs
 )
 
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
-find_package(OpenCV REQUIRED)
 
 ## Uncomment this if the package has a setup.py. This macro ensures
 ## modules and global scripts declared therein get installed
@@ -107,7 +111,7 @@ find_package(OpenCV REQUIRED)
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES cym_planner
-#  CATKIN_DEPENDS nav_core pluginlib roscpp
+#  CATKIN_DEPENDS costmap_2d geometry_msgs nav_core pluginlib roscpp sensor_msgs std_msgs tf tf2_ros visualization_msgs
 #  DEPENDS system_lib
 )
 
@@ -120,7 +124,6 @@ catkin_package(
 include_directories(
   include
   ${catkin_INCLUDE_DIRS}
-  ${OpenCV_INCLUDE_DIRS}
 )
 
 ## Declare a C++ library
@@ -133,7 +136,6 @@ add_dependencies(cym_planner ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORT
 
 target_link_libraries(cym_planner
    ${catkin_LIBRARIES}
-   ${OpenCV_LIBRARIES}
  )
 
 ## Add cmake target dependencies of the library

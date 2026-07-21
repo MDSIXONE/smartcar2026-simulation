@@ -8,14 +8,28 @@
         # 里程计坐标系
         "odom_frame": "odom",
 
+        # 局部控制器直接订阅的二维激光雷达。每帧 /scan 会转成 base_link 下的点云，
+        # 用于候选速度轨迹的碰撞检测和评分；不是仅通过 costmap 间接使用。
+        "scan_topic": "/scan",
+
+        # 超过该时长未收到新的激光数据，局部控制器必须输出零速度。
+        "scan_timeout": 0.25,
+
+        # 参与局部决策的有效激光范围，单位 m。
+        "scan_min_range": 0.03,
+        "scan_max_range": 4.0,
+
+        # 车体外扩安全距离、制动减速度和控制反应时间。
+        # 候选速度的停车距离为 v^2/(2a) + v*t + safety_margin。
+        "safety_margin": 0.035,
+        "braking_deceleration": 3.0,
+        "reaction_time": 0.05,
+
         # 前视距离，数值越大越平滑，数值越小越贴近路径
         "lookahead_distance": 0.5,
 
         # 前进速度增益：前方路径点距离乘以该值，决定提速快慢
         "linear_x_gain": 10.0,
-
-        # 前进位置环D项：抑制速度变化和接近路径点时的冲动，建议从0.05开始调整
-        "linear_x_kd": 0.05,
 
         # 当前禁止横向平移，此参数暂不参与车辆控制
         "linear_y_gain": 5.0,
@@ -45,6 +59,9 @@
         # 终点方向对准时保留的前后微调增益；设为 0 可只原地旋转。
         "final_linear_x_gain": 1.5,
 
+        # 终点位置误差小于该值后，局部控制切换到末端朝向对正。
+        "goal_position_tolerance": 0.05,
+
         # 任务节点在夹取完成后发布 /sim_task3/carry_mode=true。
         # 载物通过障碍物加工区时，前进、转向和终点对正最高速度均乘以此值。
         "carry_speed_scale": 0.80,
@@ -52,13 +69,26 @@
         # 车头方向容差，单位 rad；当前边走边转逻辑中保留备用
         "heading_tolerance": 0.20,
 
-        # 局部轨迹模拟时长，单位秒
+        # 局部轨迹模拟时长和步长，单位秒。每个候选 (v, w) 都会以此轨迹
+        # 对激光点云做车体扫掠碰撞检测。
         "simulation_time": 0.3,
 
         # 局部轨迹模拟步长，单位秒
         "simulation_step": 0.05,
 
-        # 沿全局路径向前检查的实际距离，单位 m；0.30 m 与 local costmap 车长一致，命中障碍后请求 move_base 重规划
+        # 速度采样数量。更多采样能绕开动态障碍，但会增加控制器计算量。
+        "v_samples": 7,
+        "w_samples": 9,
+
+        # 激光轨迹评分：路径贴合、朝向、障碍净空、速度和转向平滑性。
+        "path_distance_weight": 4.0,
+        "heading_weight": 0.8,
+        "clearance_weight": 0.5,
+        "velocity_weight": 0.5,
+        "angular_velocity_weight": 0.05,
+
+        # costmap 只作为全局重规划的辅助约束；局部速度安全性由上面的激光点云轨迹检测决定。
+        # 沿全局路径向前检查的实际距离，单位 m，命中障碍后请求 move_base 重规划。
         "obstacle_lookahead_distance": 0.30,
 
         # 253 覆盖膨胀区，254 为致命障碍；代码按 cost >= 此值判定

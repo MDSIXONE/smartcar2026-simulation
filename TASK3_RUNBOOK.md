@@ -183,7 +183,43 @@ catkin_make --pkg cym_planner -j1
 source devel/setup.bash
 ```
 
-## 5. 运行状态检查
+## 5. 激光点云局部控制检查
+
+`CymPlanner` 直接订阅 `/scan`，将二维激光扫描转换到 `base_link` 下的点云，并以点云对候选 `(linear.x, angular.z)` 轨迹做车体扫掠碰撞检测和评分。`local_costmap` 仍会使用同一份激光数据，但只负责辅助全局重规划；它不再是局部速度决策的唯一数据源。
+
+在 RViz 中应能同时看到：
+
+- `Cym Planner Direct Laser Point Cloud`：控制器实际接收并过滤后的点云；
+- `Cym Planner Laser Candidate Trajectories`：所有候选局部轨迹；
+- `Cym Planner Laser Selected Trajectory`：最终用于输出 `cmd_vel` 的绿色轨迹。
+
+终端 B 可检查控制器状态：
+
+```bash
+rostopic echo /move_base/CymPlanner/safety_state
+```
+
+正常移动时状态以 `ACTIVE: direct laser rollout selected` 开头。以下两种状态会让车辆主动输出零速度：
+
+```text
+STOP: laser scan unavailable or stale
+STOP: laser point cloud rejects every local trajectory
+```
+
+验证激光数据链路：
+
+```bash
+rostopic hz /scan
+rostopic echo -n 1 /move_base/CymPlanner/laser_points
+```
+
+`/scan` 的频率应稳定高于控制器要求；当前仿真激光雷达为 15 Hz，`scan_timeout` 默认是 0.25 秒。相关安全距离、制动模型、采样数和评分权重都位于：
+
+```text
+src/cym_planner/config/cym_planner_params.json
+```
+
+## 6. 运行状态检查
 
 在终端 B 观察实时任务状态：
 
@@ -221,7 +257,7 @@ rostopic echo -n 1 /sim_task3/done
 data: True
 ```
 
-## 6. 手动标定工具
+## 7. 手动标定工具
 
 仅在自动任务没有运行时使用。
 
