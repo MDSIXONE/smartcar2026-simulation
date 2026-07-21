@@ -121,6 +121,10 @@ void CymPlanner::initialize(std::string name, tf2_ros::Buffer* /* tf */,
                      obstacle_lookahead_distance_, 0.30);
     readPlannerParam(planner_nh, legacy_nh, "obstacle_cost_threshold",
                      obstacle_cost_threshold_, 253);
+    readPlannerParam(planner_nh, legacy_nh, "minimum_progress_velocity",
+                     minimum_progress_velocity_, 0.05);
+    readPlannerParam(planner_nh, legacy_nh, "minimum_turn_velocity",
+                     minimum_turn_velocity_, 0.10);
 
     lookahead_distance_ = std::max(0.05, lookahead_distance_);
     max_vel_x_ = std::max(0.0, max_vel_x_);
@@ -144,6 +148,8 @@ void CymPlanner::initialize(std::string name, tf2_ros::Buffer* /* tf */,
     obstacle_lookahead_distance_ = std::max(0.0, obstacle_lookahead_distance_);
     obstacle_cost_threshold_ = static_cast<int>(
         clampValue(static_cast<double>(obstacle_cost_threshold_), 0.0, 255.0));
+    minimum_progress_velocity_ = std::max(0.0, minimum_progress_velocity_);
+    minimum_turn_velocity_ = std::max(0.0, minimum_turn_velocity_);
 
     footprint_min_x_ = std::numeric_limits<double>::infinity();
     footprint_max_x_ = -std::numeric_limits<double>::infinity();
@@ -744,6 +750,37 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         return false;
     }
 
+    const CandidateTrajectory& selected = candidates[selected_index];
+    if(!pose_adjusting_)
+    {
+        bool has_safe_forward_trajectory = false;
+        for(const CandidateTrajectory& candidate : candidates)
+        {
+            if(candidate.valid &&
+               candidate.linear_velocity >= minimum_progress_velocity_)
+            {
+                has_safe_forward_trajectory = true;
+                break;
+            }
+        }
+
+        const bool selected_command_is_idle =
+            selected.linear_velocity < minimum_progress_velocity_ &&
+            std::abs(selected.angular_velocity) < minimum_turn_velocity_;
+        if(!has_safe_forward_trajectory || selected_command_is_idle)
+        {
+            // A zero Twist is a safety stop, never a navigation success while
+            // the goal is still ahead.  Returning false tells move_base to keep
+            // the action active and obtain a new global path around the dynamic
+            // laser obstacle instead of waiting at the old path forever.
+            publishSafetyState(
+                "BLOCKED: no forward lidar trajectory; requesting global replan");
+            ROS_WARN_THROTTLE(1.0,
+                              "cym_planner: dynamic obstacle blocks local progress; requesting global replan");
+            return false;
+        }
+    }
+
     // The raw laser point cloud has already generated and selected a safe local
     // command above.  Costmap is deliberately evaluated afterwards as a secondary
     // route-level constraint: it may request a new global path, but never replaces
@@ -754,7 +791,6 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         return false;
     }
 
-    const CandidateTrajectory& selected = candidates[selected_index];
     cmd_vel.linear.x = selected.linear_velocity;
     cmd_vel.angular.z = selected.angular_velocity;
     std::ostringstream state;

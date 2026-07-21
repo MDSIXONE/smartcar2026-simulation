@@ -11,7 +11,8 @@
   <node pkg="move_base" type="move_base" respawn="false" name="move_base" output="screen" clear_params="true">
     <param name="base_global_planner" value="global_planner/GlobalPlanner"/>
     <param name="base_local_planner" value="cym_planner/CymPlanner"/>
-    <param name="planner_frequency" value="0.0"/>
+    <!-- 动态障碍进入 global_costmap 后，每 0.5 秒重新生成一次全局路线。 -->
+    <param name="planner_frequency" value="2.0"/>
     <param name="controller_frequency" value="20.0"/>
     <param name="planner_patience" value="3.0"/>
     <!-- CymPlanner 发现前方阻塞会主动返回 false；0.5 秒后进入恢复/重规划，

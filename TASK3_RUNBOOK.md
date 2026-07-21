@@ -206,6 +206,14 @@ STOP: laser scan unavailable or stale
 STOP: laser point cloud rejects every local trajectory
 ```
 
+若行进中出现地图原本没有的激光障碍，且当前全局路线无法提供安全前进轨迹，控制器会发布：
+
+```text
+BLOCKED: no forward lidar trajectory; requesting global replan
+```
+
+这不是任务完成：`move_base` 会保持目标为 `ACTIVE`，并以 2 Hz 使用 global costmap 中的 `/scan` 障碍重新生成绕行路线。只有 `GOAL_REACHED` 才代表任务导航终点完成。
+
 验证激光数据链路：
 
 ```bash

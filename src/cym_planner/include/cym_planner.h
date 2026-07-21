@@ -118,6 +118,8 @@ private:
     double angular_velocity_weight_;
     double obstacle_lookahead_distance_;
     int obstacle_cost_threshold_;
+    double minimum_progress_velocity_;
+    double minimum_turn_velocity_;
     double footprint_min_x_;
     double footprint_max_x_;
     double footprint_min_y_;
