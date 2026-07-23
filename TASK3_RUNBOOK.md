@@ -120,10 +120,10 @@ roslaunch car3 task3_execute.launch cargo_category:=electronics cargo_name:="耳
 | --- | --- |
 | 搜索顺序 | `move_base` 依次到左、中、右三个固定观察位 |
 | 物块定位 | `cube_yolov5_best.onnx` 从 `/camera/rgb/image_raw` 输出物块框 |
-| 类别复核 | 对 YOLO 框内的标签像素做 HOG/SVM 复核，避免低置信类别头夹错块 |
 | 水平对中 | 在观察位只转动车身，使物块先移到画面水平中央 |
-| 最终对位 | 按物块框中心、宽度和高度误差控制 `linear.x` 与 `angular.z` |
-| 夹取条件 | 检测框连续 5 帧落入对应区域的可夹取范围 |
+| 近距检查 | 按物块框中心、宽度和高度误差控制 `linear.x` 与 `angular.z`，进入标定范围 |
+| 类别复核 | 在标定近距视角对 YOLO 框内标签做 HOG/SVM 五帧投票，避免远距离小目标夹错 |
+| 夹取条件 | 检测框稳定落入可夹取范围，且近距类别与任务类别一致 |
 
 三处观察位和已记录的可夹取图像范围位于：
 

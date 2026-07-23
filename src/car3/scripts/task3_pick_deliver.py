@@ -550,8 +550,7 @@ class PickDeliverTask:
     def _scan_region(self, region):
         deadline = rospy.Time.now() + rospy.Duration(self.vision_scan_timeout)
         last_sequence = -1
-        class_votes = []
-        seen = {}
+        seen_frames = 0
         rate = rospy.Rate(20)
         try:
             while not rospy.is_shutdown() and rospy.Time.now() < deadline:
@@ -562,16 +561,14 @@ class PickDeliverTask:
                 last_sequence, image = frame
                 detections = self._detect(image, region)
                 if not detections:
-                    class_votes = []
                     self.cmd_pub.publish(Twist())
                     rate.sleep()
                     continue
 
                 cube = detections[0]
-                seen[cube["class_name"]] = seen.get(cube["class_name"], 0) + 1
+                seen_frames += 1
                 horizontal_error = region["grasp_target"][0] - cube["center_x"]
                 if abs(horizontal_error) > self.vision_scan_center_tolerance:
-                    class_votes = []
                     command = Twist()
                     command.angular.z = clamp(
                         self.vision_angular_gain * horizontal_error,
@@ -586,57 +583,21 @@ class PickDeliverTask:
                     continue
 
                 self.cmd_pub.publish(Twist())
-                class_votes.append(cube)
-                class_votes = class_votes[-self.vision_scan_vote_frames:]
-                if len(class_votes) >= self.vision_scan_vote_frames:
-                    counts = {}
-                    for vote in class_votes:
-                        counts[vote["class_id"]] = counts.get(vote["class_id"], 0) + 1
-                    voted_class_id, support = max(
-                        counts.items(), key=lambda item: item[1]
+                self._status(
+                    "Camera acquired a cube in %s region "
+                    "(YOLO raw=%s, confidence=%.3f); approaching for close-range classification"
+                    % (
+                        region["display_name"],
+                        cube["yolo_class_name"],
+                        cube["confidence"],
                     )
-                    if support <= len(class_votes) // 2:
-                        rate.sleep()
-                        continue
-                    voted_cube = max(
-                        (
-                            vote for vote in class_votes
-                            if vote["class_id"] == voted_class_id
-                        ),
-                        key=lambda vote: vote["confidence"],
-                    )
-                    self._status(
-                        "Camera classified %s region as %s "
-                        "(vote=%d/%d, YOLO raw=%s, confidence=%.3f)"
-                        % (
-                            region["display_name"],
-                            voted_cube["class_name"],
-                            support,
-                            len(class_votes),
-                            voted_cube["yolo_class_name"],
-                            voted_cube["confidence"],
-                        )
-                    )
-                    if voted_class_id != self.target_class_id:
-                        return None
-                    self._status(
-                        "YOLOv5 recognised %s in %s region: confidence=%.3f"
-                        % (
-                            self.category,
-                            region["display_name"],
-                            voted_cube["confidence"],
-                        )
-                    )
-                    return voted_cube
-                rate.sleep()
+                )
+                return cube
         finally:
             self.cmd_pub.publish(Twist())
-        seen_text = ", ".join(
-            "%s=%d" % item for item in sorted(seen.items())
-        ) or "none"
         self._status(
-            "No %s detected in %s region; seen: %s"
-            % (self.category, region["display_name"], seen_text)
+            "No cube acquired in %s region; detector frames=%d"
+            % (region["display_name"], seen_frames)
         )
         return None
 
@@ -795,6 +756,74 @@ class PickDeliverTask:
         self._status("Visual alignment timed out in %s region" % region["display_name"])
         return False
 
+    def _classify_aligned_cube(self, region):
+        deadline = rospy.Time.now() + rospy.Duration(self.vision_scan_timeout)
+        last_sequence = -1
+        votes = []
+        rate = rospy.Rate(20)
+        target = region["grasp_target"]
+        while not rospy.is_shutdown() and rospy.Time.now() < deadline:
+            frame = self._latest_frame(last_sequence)
+            if frame is None:
+                rate.sleep()
+                continue
+            last_sequence, image = frame
+            detections = self._detect(image, region)
+            if not detections:
+                votes = []
+                rate.sleep()
+                continue
+            cube = min(
+                detections,
+                key=lambda item: (
+                    (item["center_x"] - target[0]) ** 2
+                    + (item["center_y"] - target[1]) ** 2
+                ),
+            )
+            if not self._inside_grasp_range(cube, region):
+                votes = []
+                rate.sleep()
+                continue
+            votes.append(cube)
+            votes = votes[-self.vision_scan_vote_frames:]
+            if len(votes) < self.vision_scan_vote_frames:
+                rate.sleep()
+                continue
+            counts = {}
+            for vote in votes:
+                counts[vote["class_id"]] = counts.get(vote["class_id"], 0) + 1
+            voted_class_id, support = max(
+                counts.items(), key=lambda item: item[1]
+            )
+            if support <= len(votes) // 2:
+                rate.sleep()
+                continue
+            voted_cube = max(
+                (
+                    vote for vote in votes
+                    if vote["class_id"] == voted_class_id
+                ),
+                key=lambda vote: vote["confidence"],
+            )
+            self._status(
+                "Close-range camera classified %s region as %s "
+                "(vote=%d/%d, YOLO raw=%s, confidence=%.3f)"
+                % (
+                    region["display_name"],
+                    voted_cube["class_name"],
+                    support,
+                    len(votes),
+                    voted_cube["yolo_class_name"],
+                    voted_cube["confidence"],
+                )
+            )
+            return voted_cube
+        self._status(
+            "Close-range classification timed out in %s region"
+            % region["display_name"]
+        )
+        return None
+
     def _find_and_align_target(self):
         for region in self.search_regions:
             if not self._move_base(
@@ -819,10 +848,24 @@ class PickDeliverTask:
             if detection is None:
                 continue
             if not self._vision_align(region, detection):
-                raise rospy.ROSException(
-                    "found %s but could not visually align in %s region"
-                    % (self.category, region["display_name"])
+                self._status(
+                    "Could not reach close-range inspection pose in %s region; continuing search"
+                    % region["display_name"]
                 )
+                continue
+            classified = self._classify_aligned_cube(region)
+            if classified is None:
+                continue
+            if classified["class_id"] != self.target_class_id:
+                self._status(
+                    "%s region is not %s; continuing search"
+                    % (region["display_name"], self.category)
+                )
+                continue
+            self._status(
+                "YOLOv5 recognised %s in %s region after visual alignment"
+                % (self.category, region["display_name"])
+            )
             return region
         raise rospy.ROSException(
             "YOLOv5 could not find category %s in left/middle/right regions"

@@ -12,8 +12,9 @@ vision_confidence_threshold: 0.20
 vision_nms_threshold: 0.45
 vision_input_size: 640
 vision_scan_timeout: 15.0
-# Scanning only needs to place the cube near image centre; final grasp
-# alignment below uses the tighter four-dimensional acceptance ranges.
+# Scanning only places the cube near image centre.  The vehicle then approaches
+# the recorded grasp range before the class vote, because label appearance is
+# more reliable at the calibrated close-range scale.
 vision_scan_center_tolerance: 0.060
 vision_scan_vote_frames: 5
 vision_align_timeout: 25.0

@@ -26,6 +26,14 @@ class Task3VisualPipelineTest(unittest.TestCase):
         self.assertNotIn("cube_world_poses", source)
         self.assertNotIn("time.time()", source)
         self.assertIn("rospy.Time.now()", source)
+        search_body = source[
+            source.index("def _find_and_align_target"):
+            source.index("def _move_base", source.index("def _find_and_align_target"))
+        ]
+        self.assertLess(
+            search_body.index("_vision_align"),
+            search_body.index("_classify_aligned_cube"),
+        )
 
     def test_search_order_and_grasp_calibration_are_complete(self):
         config = yaml.safe_load(VISION_CONFIG.read_text(encoding="utf-8"))
