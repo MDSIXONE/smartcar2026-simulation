@@ -27,6 +27,8 @@ class Task3VisualPipelineTest(unittest.TestCase):
 
     def test_search_order_and_grasp_calibration_are_complete(self):
         config = yaml.safe_load(VISION_CONFIG.read_text(encoding="utf-8"))
+        self.assertGreaterEqual(config["vision_scan_center_tolerance"], 0.05)
+        self.assertGreaterEqual(config["vision_scan_vote_frames"], 5)
         regions = config["vision_search_regions"]
         self.assertEqual(
             [region["name"] for region in regions],
@@ -78,6 +80,7 @@ class Task3VisualPipelineTest(unittest.TestCase):
         detector._publish_vision_debug = lambda *_args: None
 
         checked = set()
+        checked_combinations = set()
         for line in (DATASET_DIR / "metadata.jsonl").read_text(
             encoding="utf-8"
         ).splitlines():
@@ -97,7 +100,18 @@ class Task3VisualPipelineTest(unittest.TestCase):
                 "%s -> %s" % (record["image"], detections[0]),
             )
             checked.add(record["class_name"])
+            checked_combinations.add(
+                (record["class_name"], record["target_region"])
+            )
         self.assertEqual(checked, {"food", "daily", "electronics"})
+        self.assertEqual(
+            checked_combinations,
+            {
+                (class_name, region_name)
+                for class_name in ("food", "daily", "electronics")
+                for region_name in ("left", "upper", "right")
+            },
+        )
 
 
 if __name__ == "__main__":

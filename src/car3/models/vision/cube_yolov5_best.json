@@ -19,9 +19,9 @@
   "runtime": "onnxruntime 1.16.3",
   "label_guard": {
     "file": "cube_label_hog_svm.xml",
-    "sha256": "1E27874CCDF70C7D6BD9954EAB380B695508E29354011D519722CDCDE64CA079",
+    "sha256": "CDE74D969480EA139E701C695102E15D7B0FF137F756C25A8338E4EECF5C9209",
     "features": "64x64 grayscale HOG",
-    "training_boxes": "YOLOv5 detections on the 27 captured grid samples",
+    "training_boxes": "YOLOv5 detections on 135 captured grid samples covering every class-region combination",
     "purpose": "reject class-head mix-ups while retaining YOLOv5 localisation"
   }
 }

@@ -718,11 +718,17 @@ class CubeDatasetCapture:
         rospy.loginfo("Saved 3x3 preview %s", preview_path)
 
     def _write_summary(self):
+        all_records = []
+        with open(self.metadata_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if line:
+                    all_records.append(json.loads(line))
         counts = {
             split: {
                 class_name: sum(
                     1
-                    for record in self.saved_records
+                    for record in all_records
                     if record["split"] == split
                     and record["class_name"] == class_name
                 )
@@ -731,11 +737,14 @@ class CubeDatasetCapture:
             for split in ("train", "val")
         }
         summary = {
-            "run_id": self.run_id,
+            "latest_run_id": self.run_id,
+            "run_ids": sorted(
+                {record["run_id"] for record in all_records}
+            ),
             "dataset_dir": ".",
             "classes": list(CLASS_NAMES),
             "counts": counts,
-            "total_images": len(self.saved_records),
+            "total_images": len(all_records),
             "arm_remained_stationary": True,
             "grid_distance_offsets": self.grid_distance_offsets,
             "grid_yaw_offsets": self.grid_yaw_offsets,

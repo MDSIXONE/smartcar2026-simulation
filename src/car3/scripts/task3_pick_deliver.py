@@ -113,8 +113,11 @@ class PickDeliverTask:
         self.vision_nms = float(rospy.get_param("~vision_nms_threshold", 0.45))
         self.vision_input_size = int(rospy.get_param("~vision_input_size", 640))
         self.vision_scan_timeout = float(rospy.get_param("~vision_scan_timeout", 8.0))
-        self.vision_scan_stable_frames = int(
-            rospy.get_param("~vision_scan_stable_frames", 4)
+        self.vision_scan_center_tolerance = float(
+            rospy.get_param("~vision_scan_center_tolerance", 0.060)
+        )
+        self.vision_scan_vote_frames = int(
+            rospy.get_param("~vision_scan_vote_frames", 5)
         )
         self.vision_align_timeout = float(rospy.get_param("~vision_align_timeout", 25.0))
         self.vision_lost_timeout = float(rospy.get_param("~vision_lost_timeout", 2.5))
@@ -548,8 +551,7 @@ class PickDeliverTask:
     def _scan_region(self, region):
         deadline = time.time() + self.vision_scan_timeout
         last_sequence = -1
-        stable_frames = 0
-        stable_class_id = None
+        class_votes = []
         seen = {}
         rate = rospy.Rate(20)
         try:
@@ -561,7 +563,7 @@ class PickDeliverTask:
                 last_sequence, image = frame
                 detections = self._detect(image, region)
                 if not detections:
-                    stable_frames = 0
+                    class_votes = []
                     self.cmd_pub.publish(Twist())
                     rate.sleep()
                     continue
@@ -569,9 +571,8 @@ class PickDeliverTask:
                 cube = detections[0]
                 seen[cube["class_name"]] = seen.get(cube["class_name"], 0) + 1
                 horizontal_error = region["grasp_target"][0] - cube["center_x"]
-                if abs(horizontal_error) > 0.030:
-                    stable_frames = 0
-                    stable_class_id = None
+                if abs(horizontal_error) > self.vision_scan_center_tolerance:
+                    class_votes = []
                     command = Twist()
                     command.angular.z = clamp(
                         self.vision_angular_gain * horizontal_error,
@@ -586,33 +587,48 @@ class PickDeliverTask:
                     continue
 
                 self.cmd_pub.publish(Twist())
-                if cube["class_id"] == stable_class_id:
-                    stable_frames += 1
-                else:
-                    stable_class_id = cube["class_id"]
-                    stable_frames = 1
-                if stable_frames >= self.vision_scan_stable_frames:
+                class_votes.append(cube)
+                class_votes = class_votes[-self.vision_scan_vote_frames:]
+                if len(class_votes) >= self.vision_scan_vote_frames:
+                    counts = {}
+                    for vote in class_votes:
+                        counts[vote["class_id"]] = counts.get(vote["class_id"], 0) + 1
+                    voted_class_id, support = max(
+                        counts.items(), key=lambda item: item[1]
+                    )
+                    if support <= len(class_votes) // 2:
+                        rate.sleep()
+                        continue
+                    voted_cube = max(
+                        (
+                            vote for vote in class_votes
+                            if vote["class_id"] == voted_class_id
+                        ),
+                        key=lambda vote: vote["confidence"],
+                    )
                     self._status(
                         "Camera classified %s region as %s "
-                        "(YOLO raw=%s, confidence=%.3f)"
+                        "(vote=%d/%d, YOLO raw=%s, confidence=%.3f)"
                         % (
                             region["display_name"],
-                            cube["class_name"],
-                            cube["yolo_class_name"],
-                            cube["confidence"],
+                            voted_cube["class_name"],
+                            support,
+                            len(class_votes),
+                            voted_cube["yolo_class_name"],
+                            voted_cube["confidence"],
                         )
                     )
-                    if cube["class_id"] != self.target_class_id:
+                    if voted_class_id != self.target_class_id:
                         return None
                     self._status(
                         "YOLOv5 recognised %s in %s region: confidence=%.3f"
                         % (
                             self.category,
                             region["display_name"],
-                            cube["confidence"],
+                            voted_cube["confidence"],
                         )
                     )
-                    return cube
+                    return voted_cube
                 rate.sleep()
         finally:
             self.cmd_pub.publish(Twist())
@@ -791,7 +807,11 @@ class PickDeliverTask:
                     % region["display_name"]
                 )
                 continue
+            # move_base can keep publishing for a short time after reporting
+            # success.  Relinquish navigation before camera steering starts.
+            self.nav.cancel_all_goals()
             self.cmd_pub.publish(Twist())
+            rospy.sleep(0.20)
             self._status(
                 "Scanning %s region for %s with YOLOv5"
                 % (region["display_name"], self.category)
@@ -799,7 +819,6 @@ class PickDeliverTask:
             detection = self._scan_region(region)
             if detection is None:
                 continue
-            self.nav.cancel_all_goals()
             if not self._vision_align(region, detection):
                 raise rospy.ROSException(
                     "found %s but could not visually align in %s region"

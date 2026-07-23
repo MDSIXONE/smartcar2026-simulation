@@ -1,5 +1,12 @@
 {
-  "run_id": "20260724_002024",
+  "latest_run_id": "20260724_042123",
+  "run_ids": [
+    "20260724_002024",
+    "20260724_040751",
+    "20260724_041347",
+    "20260724_041748",
+    "20260724_042123"
+  ],
   "dataset_dir": ".",
   "classes": [
     "food",
@@ -8,17 +15,17 @@
   ],
   "counts": {
     "train": {
-      "food": 7,
-      "daily": 7,
-      "electronics": 7
+      "food": 35,
+      "daily": 35,
+      "electronics": 35
     },
     "val": {
-      "food": 2,
-      "daily": 2,
-      "electronics": 2
+      "food": 10,
+      "daily": 10,
+      "electronics": 10
     }
   },
-  "total_images": 27,
+  "total_images": 135,
   "arm_remained_stationary": true,
   "grid_distance_offsets": [
     0.25,
