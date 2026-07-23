@@ -117,7 +117,7 @@ class PickDeliverTask:
         )
         self.vision_classify_center_x = [
             float(value) for value in rospy.get_param(
-                "~vision_classify_center_x", [0.22, 0.50, 0.78]
+                "~vision_classify_center_x", [0.26, 0.50, 0.72]
             )
         ]
         self.vision_classify_center_y = float(

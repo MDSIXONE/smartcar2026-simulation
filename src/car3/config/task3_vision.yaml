@@ -16,7 +16,7 @@ vision_scan_timeout: 15.0
 # the recorded middle-row scale and samples left/centre/right views before the
 # class vote.  Only the matching class is finally driven into grasp range.
 vision_scan_center_tolerance: 0.060
-vision_classify_center_x: [0.22, 0.50, 0.78]
+vision_classify_center_x: [0.26, 0.50, 0.72]
 vision_classify_center_y: 0.515
 vision_classify_frames_per_view: 3
 vision_classify_view_timeout: 12.0
