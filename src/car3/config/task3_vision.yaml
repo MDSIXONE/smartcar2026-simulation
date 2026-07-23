@@ -13,10 +13,15 @@ vision_nms_threshold: 0.45
 vision_input_size: 640
 vision_scan_timeout: 15.0
 # Scanning only places the cube near image centre.  The vehicle then approaches
-# the recorded grasp range before the class vote, because label appearance is
-# more reliable at the calibrated close-range scale.
+# the recorded middle-row scale and samples left/centre/right views before the
+# class vote.  Only the matching class is finally driven into grasp range.
 vision_scan_center_tolerance: 0.060
-vision_scan_vote_frames: 5
+vision_classify_center_x: [0.22, 0.50, 0.78]
+vision_classify_center_y: 0.515
+vision_classify_frames_per_view: 3
+vision_classify_view_timeout: 12.0
+vision_classify_tolerance_x: 0.045
+vision_classify_tolerance_y: 0.055
 vision_align_timeout: 25.0
 vision_lost_timeout: 2.5
 vision_align_stable_frames: 5
