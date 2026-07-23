@@ -1,0 +1,33 @@
+{
+  "run_id": "20260724_002024",
+  "dataset_dir": ".",
+  "classes": [
+    "food",
+    "daily",
+    "electronics"
+  ],
+  "counts": {
+    "train": {
+      "food": 7,
+      "daily": 7,
+      "electronics": 7
+    },
+    "val": {
+      "food": 2,
+      "daily": 2,
+      "electronics": 2
+    }
+  },
+  "total_images": 27,
+  "arm_remained_stationary": true,
+  "grid_distance_offsets": [
+    0.25,
+    0.1,
+    0.0
+  ],
+  "grid_yaw_offsets": [
+    -0.3,
+    0.0,
+    0.3
+  ]
+}

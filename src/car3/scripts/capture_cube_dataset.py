@@ -624,7 +624,7 @@ class CubeDatasetCapture:
         }
         summary = {
             "run_id": self.run_id,
-            "dataset_dir": self.dataset_dir,
+            "dataset_dir": ".",
             "classes": list(CLASS_NAMES),
             "counts": counts,
             "total_images": len(self.saved_records),

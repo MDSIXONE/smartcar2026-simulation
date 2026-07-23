@@ -18,6 +18,7 @@
 | `src/gazebo_nav` | 最终的 `move_base`、代价地图与导航启动文件 |
 | `src/cym_planner` | CYM 局部规划器源码与参数 |
 | `src/roboticsgroup_gazebo_plugins` | Gazebo 机械臂/夹爪辅助插件 |
+| `datasets/cube_yolov5` | 三类别机械臂静止九宫格样例集、YOLOv5 标签与检查预览 |
 
 ## 启动链路
 
