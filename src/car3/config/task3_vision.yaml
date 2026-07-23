@@ -12,16 +12,13 @@ vision_confidence_threshold: 0.20
 vision_nms_threshold: 0.45
 vision_input_size: 640
 vision_scan_timeout: 15.0
-# Scanning only places the cube near image centre.  The vehicle then approaches
-# the recorded middle-row scale and samples left/centre/right views before the
-# class vote.  Only the matching class is finally driven into grasp range.
+# Scanning only places a cube near image centre.  The vehicle then drives the
+# detected box into the recorded grasp range before voting on its class.  This
+# keeps label recognition in the same scale and perspective as the training
+# dataset's bottom-centre images.
 vision_scan_center_tolerance: 0.060
-vision_classify_center_x: [0.26, 0.50, 0.72]
-vision_classify_center_y: 0.515
-vision_classify_frames_per_view: 3
-vision_classify_view_timeout: 12.0
-vision_classify_tolerance_x: 0.075
-vision_classify_tolerance_y: 0.055
+vision_classify_stable_frames: 7
+vision_classify_timeout: 5.0
 vision_align_timeout: 25.0
 vision_lost_timeout: 2.5
 vision_align_stable_frames: 5

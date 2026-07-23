@@ -115,25 +115,11 @@ class PickDeliverTask:
         self.vision_scan_center_tolerance = float(
             rospy.get_param("~vision_scan_center_tolerance", 0.060)
         )
-        self.vision_classify_center_x = [
-            float(value) for value in rospy.get_param(
-                "~vision_classify_center_x", [0.26, 0.50, 0.72]
-            )
-        ]
-        self.vision_classify_center_y = float(
-            rospy.get_param("~vision_classify_center_y", 0.515)
+        self.vision_classify_stable_frames = int(
+            rospy.get_param("~vision_classify_stable_frames", 7)
         )
-        self.vision_classify_frames_per_view = int(
-            rospy.get_param("~vision_classify_frames_per_view", 3)
-        )
-        self.vision_classify_view_timeout = float(
-            rospy.get_param("~vision_classify_view_timeout", 12.0)
-        )
-        self.vision_classify_tolerance_x = float(
-            rospy.get_param("~vision_classify_tolerance_x", 0.075)
-        )
-        self.vision_classify_tolerance_y = float(
-            rospy.get_param("~vision_classify_tolerance_y", 0.055)
+        self.vision_classify_timeout = float(
+            rospy.get_param("~vision_classify_timeout", 5.0)
         )
         self.vision_align_timeout = float(rospy.get_param("~vision_align_timeout", 25.0))
         self.vision_lost_timeout = float(rospy.get_param("~vision_lost_timeout", 2.5))
@@ -602,7 +588,7 @@ class PickDeliverTask:
                 self.cmd_pub.publish(Twist())
                 self._status(
                     "Camera acquired a cube in %s region "
-                    "(YOLO raw=%s, confidence=%.3f); approaching for close-range classification"
+                    "(YOLO raw=%s, confidence=%.3f); approaching the calibrated grasp view"
                     % (
                         region["display_name"],
                         cube["yolo_class_name"],
@@ -773,132 +759,55 @@ class PickDeliverTask:
         self._status("Visual alignment timed out in %s region" % region["display_name"])
         return False
 
-    def _collect_classification_view(
-        self, region, target_x, initial_detection
-    ):
-        deadline = rospy.Time.now() + rospy.Duration(
-            self.vision_classify_view_timeout
-        )
-        last_sequence = -1
-        tracked_center = (
-            initial_detection["center_x"],
-            initial_detection["center_y"],
-        )
-        samples = []
-        rate = rospy.Rate(20)
-        while not rospy.is_shutdown() and rospy.Time.now() < deadline:
-            frame = self._latest_frame(last_sequence)
-            if frame is None:
-                rate.sleep()
-                continue
-            last_sequence, image = frame
-            detections = self._detect(image, region)
-            if not detections:
-                samples = []
-                self.cmd_pub.publish(Twist())
-                rate.sleep()
-                continue
-            cube = min(
-                detections,
-                key=lambda item: (
-                    (item["center_x"] - tracked_center[0]) ** 2
-                    + (item["center_y"] - tracked_center[1]) ** 2
-                ),
-            )
-            if math.hypot(
-                cube["center_x"] - tracked_center[0],
-                cube["center_y"] - tracked_center[1],
-            ) > 0.25:
-                samples = []
-                self.cmd_pub.publish(Twist())
-                rate.sleep()
-                continue
-            tracked_center = (cube["center_x"], cube["center_y"])
-            horizontal_error = target_x - cube["center_x"]
-            vertical_error = self.vision_classify_center_y - cube["center_y"]
-            if (
-                abs(horizontal_error) <= self.vision_classify_tolerance_x
-                and abs(vertical_error) <= self.vision_classify_tolerance_y
-            ):
-                self.cmd_pub.publish(Twist())
-                samples.append(cube)
-                if len(samples) >= self.vision_classify_frames_per_view:
-                    self._status(
-                        "Captured classification view in %s: "
-                        "target=(%.3f, %.3f), box=(%.3f, %.3f)"
-                        % (
-                            region["display_name"],
-                            target_x,
-                            self.vision_classify_center_y,
-                            cube["center_x"],
-                            cube["center_y"],
-                        )
-                    )
-                    return samples
-                rate.sleep()
-                continue
-            samples = []
-            command = Twist()
-            command.angular.z = clamp(
-                self.vision_angular_gain * horizontal_error,
-                -self.vision_max_angular,
-                self.vision_max_angular,
-            )
-            if abs(horizontal_error) > self.vision_classify_tolerance_x:
-                command.angular.z = self._ensure_minimum_speed(
-                    command.angular.z, 0.055
-                )
-            else:
-                command.angular.z = 0.0
-            if abs(horizontal_error) <= 0.10:
-                command.linear.x = clamp(
-                    self.vision_forward_gain * vertical_error,
-                    -self.vision_max_forward,
-                    self.vision_max_forward,
-                )
-                if abs(vertical_error) > self.vision_classify_tolerance_y:
-                    command.linear.x = self._ensure_minimum_speed(
-                        command.linear.x, 0.020
-                    )
-                else:
-                    command.linear.x = 0.0
-            self.cmd_pub.publish(command)
-            rospy.loginfo_throttle(
-                1.0,
-                "Classification view %s: target=(%.3f, %.3f) "
-                "box=(%.3f, %.3f) cmd=(%.3f, %.3f)"
-                % (
-                    region["name"],
-                    target_x,
-                    self.vision_classify_center_y,
-                    cube["center_x"],
-                    cube["center_y"],
-                    command.linear.x,
-                    command.angular.z,
-                ),
-            )
-            rate.sleep()
-        self.cmd_pub.publish(Twist())
-        self._status(
-            "Could not reach classification view %.3f in %s region"
-            % (target_x, region["display_name"])
-        )
-        return None
+    def _classify_aligned_cube(self, region):
+        """Classify only after the box is inside the recorded grasp range.
 
-    def _classify_cube_multiview(self, region, initial_detection):
+        The label occupies too few pixels at the observation pose, and lateral
+        views introduce strong perspective distortion.  The recorded
+        bottom-centre grasp view is the reliable classification domain.
+        """
+        deadline = rospy.Time.now() + rospy.Duration(self.vision_classify_timeout)
+        last_sequence = -1
         votes = []
-        tracked = initial_detection
+        rate = rospy.Rate(20)
+        target_x, target_y = region["grasp_target"][:2]
         try:
-            for target_x in self.vision_classify_center_x:
-                view_samples = self._collect_classification_view(
-                    region, target_x, tracked
+            while not rospy.is_shutdown() and rospy.Time.now() < deadline:
+                frame = self._latest_frame(last_sequence)
+                if frame is None:
+                    rate.sleep()
+                    continue
+                last_sequence, image = frame
+                detections = self._detect(image, region)
+                if not detections:
+                    votes = []
+                    rate.sleep()
+                    continue
+                cube = min(
+                    detections,
+                    key=lambda item: (
+                        (item["center_x"] - target_x) ** 2
+                        + (item["center_y"] - target_y) ** 2
+                    ),
                 )
-                if not view_samples:
-                    return None
-                votes.extend(view_samples)
-                tracked = view_samples[-1]
+                if not self._inside_grasp_range(cube, region):
+                    votes = []
+                    rate.sleep()
+                    continue
+                votes.append(cube)
+                if len(votes) >= self.vision_classify_stable_frames:
+                    break
+                rate.sleep()
         finally:
             self.cmd_pub.publish(Twist())
+
+        if len(votes) < self.vision_classify_stable_frames:
+            self._status(
+                "Aligned classification timed out in %s region"
+                % region["display_name"]
+            )
+            return None
+
         counts = {}
         raw_counts = {}
         for vote in votes:
@@ -910,7 +819,7 @@ class PickDeliverTask:
         )
         if support <= len(votes) // 2:
             self._status(
-                "Multi-view classification in %s has no majority: %s"
+                "Aligned classification in %s has no majority: %s"
                 % (region["display_name"], counts)
             )
             return None
@@ -925,7 +834,7 @@ class PickDeliverTask:
             raw_counts.items(), key=lambda item: item[1]
         )
         self._status(
-            "Multi-view camera classified %s region as %s "
+            "Grasp-view camera classified %s region as %s "
             "(guard vote=%d/%d, YOLO raw=%s %d/%d)"
             % (
                 region["display_name"],
@@ -962,7 +871,13 @@ class PickDeliverTask:
             detection = self._scan_region(region)
             if detection is None:
                 continue
-            classified = self._classify_cube_multiview(region, detection)
+            if not self._vision_align(region, detection):
+                self._status(
+                    "Could not visually align the cube in %s; continuing search"
+                    % region["display_name"]
+                )
+                continue
+            classified = self._classify_aligned_cube(region)
             if classified is None:
                 continue
             if classified["class_id"] != self.target_class_id:
@@ -971,13 +886,8 @@ class PickDeliverTask:
                     % (region["display_name"], self.category)
                 )
                 continue
-            if not self._vision_align(region, classified):
-                raise rospy.ROSException(
-                    "recognised %s but could not visually align in %s region"
-                    % (self.category, region["display_name"])
-                )
             self._status(
-                "YOLOv5 recognised %s in %s region after visual alignment"
+                "Camera recognised %s in %s region at the calibrated grasp view"
                 % (self.category, region["display_name"])
             )
             return region

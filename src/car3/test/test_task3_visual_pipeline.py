@@ -31,15 +31,17 @@ class Task3VisualPipelineTest(unittest.TestCase):
             source.index("def _move_base", source.index("def _find_and_align_target"))
         ]
         self.assertLess(
-            search_body.index("_classify_cube_multiview"),
             search_body.index("_vision_align"),
+            search_body.index("_classify_aligned_cube"),
         )
+        self.assertNotIn("_classify_cube_multiview", source)
+        self.assertNotIn("_collect_classification_view", source)
 
     def test_search_order_and_grasp_calibration_are_complete(self):
         config = yaml.safe_load(VISION_CONFIG.read_text(encoding="utf-8"))
         self.assertGreaterEqual(config["vision_scan_center_tolerance"], 0.05)
-        self.assertEqual(len(config["vision_classify_center_x"]), 3)
-        self.assertGreaterEqual(config["vision_classify_frames_per_view"], 3)
+        self.assertGreaterEqual(config["vision_classify_stable_frames"], 5)
+        self.assertGreater(config["vision_classify_timeout"], 0.0)
         regions = config["vision_search_regions"]
         self.assertEqual(
             [region["name"] for region in regions],
