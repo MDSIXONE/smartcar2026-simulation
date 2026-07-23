@@ -14,6 +14,7 @@
 | 目录 | 内容 |
 | --- | --- |
 | `src/car3` | 车辆 URDF、机械臂、相机、物块、任务节点与 Gazebo 启动文件 |
+| `src/car3/models/vision` | YOLOv5 ONNX 权重、标签复核模型与模型校验信息 |
 | `src/gazebo_map` | Gazebo 世界、静态地图与加工区资源 |
 | `src/gazebo_nav` | 最终的 `move_base`、代价地图与导航启动文件 |
 | `src/cym_planner` | CYM 局部规划器源码与参数 |
@@ -31,7 +32,7 @@ task3_prepare.launch
             └─ RViz (rviz/navigation.rviz)
 ```
 
-`task3_execute.launch` 在准备阶段完成后执行物品取放任务。
+`task3_execute.launch` 在准备阶段完成后，按左/中/右观察位执行视觉搜索、图像闭环对位和物品取放任务；运行节点不读取物块的 Gazebo 位置。
 
 ## 环境
 
@@ -39,3 +40,4 @@ task3_prepare.launch
 - ROS Noetic
 - Gazebo Classic
 - catkin 工作区
+- ONNX Runtime（版本见根目录 `requirements-vision.txt`）

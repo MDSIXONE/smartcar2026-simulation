@@ -14,6 +14,8 @@ if(CATKIN_ENABLE_TESTING)
     COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_cube_mesh_uri.py)
   add_test(NAME sign_mesh_uri
     COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_sign_mesh_uri.py)
+  add_test(NAME task3_visual_pipeline
+    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_task3_visual_pipeline.py)
 endif()
 
 catkin_install_python(PROGRAMS
@@ -24,13 +26,14 @@ catkin_install_python(PROGRAMS
   scripts/projected_cube_grasp_test.py
   scripts/set_arm_initial_pose.py
   scripts/task3_pick_deliver.py
+  scripts/build_label_guard.py
   scripts/capture_cube_dataset.py
   scripts/spawn_cubes.py
   scripts/odom_tf_broadcaster.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
-foreach(dir config launch meshes urdf)
+foreach(dir config launch meshes models urdf)
 	install(DIRECTORY ${dir}/
 		DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/${dir})
 endforeach(dir)

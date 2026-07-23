@@ -7,9 +7,14 @@
   <arg name="cargo_name" default=""/>
 
   <node name="task3_pick_deliver" pkg="car3" type="task3_pick_deliver.py" output="screen">
+    <rosparam command="load" file="$(find car3)/config/task3_vision.yaml"/>
     <param name="cargo_item" value="$(arg cargo_item)"/>
     <param name="cargo_category" value="$(arg cargo_category)"/>
     <param name="cargo_name" value="$(arg cargo_name)"/>
+    <param name="vision_model_path"
+           value="$(find car3)/models/vision/cube_yolov5_best.onnx"/>
+    <param name="vision_label_guard_path"
+           value="$(find car3)/models/vision/cube_label_hog_svm.xml"/>
     <param name="arm_grasp_pose" value="-0.0001,1.5000,0.2800,1.3000,0.0000"/>
     <param name="arm_carry_pose" value="-0.0001,0.0000,-1.7200,-0.5000,0.0000"/>
     <param name="wait_for_initial_arm_pose" value="false"/>

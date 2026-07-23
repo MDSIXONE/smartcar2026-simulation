@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Pick and deliver one labelled cube after the environment is prepared.
+"""Find, visually align with, pick, and deliver one labelled cube.
 
-The random spawner deliberately assigns cube_* model names to the left, upper,
-and right bays in a random order.  Category identifies the labelled model;
-this node then obtains its live Gazebo pose and computes the matching projected
-base pose from the manual left-bay calibration.
+The task visits fixed left/middle/right observation poses and runs the trained
+YOLOv5 model on the RGB camera.  The requested class and its image-space box
+are the only inputs used to choose a bay and align the base for grasping.
+Gazebo cube positions are intentionally never read by this runtime node.
 """
 
 import math
+import os
+import threading
 import time
 
 import actionlib
+import cv2
+import numpy as np
 import rospy
 import tf.transformations as transformations
 from actionlib_msgs.msg import GoalStatus
@@ -20,8 +24,8 @@ from controller_manager_msgs.srv import (
     SwitchControllerRequest,
 )
 from gazebo_msgs.msg import ModelState
-from gazebo_msgs.srv import GetLinkState, GetModelState, SetModelState
-from geometry_msgs.msg import Pose, Quaternion, Twist
+from gazebo_msgs.srv import GetLinkState, SetModelState
+from geometry_msgs.msg import Quaternion, Twist
 from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Float64, String
@@ -30,11 +34,8 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 
 ARM_JOINTS = ["arm_joint1", "arm_joint2", "arm_joint3", "arm_joint4", "arm_joint5"]
-ALL_CUBES = ("cube_0", "cube_1", "cube_2")
-
-# The mesh/model label defines a category, while spawn_cubes.py randomises the
-# model's bay.  Therefore model ID is used only for category recognition, not
-# for left/upper/right position recognition.
+# Model names are retained only for the post-close Gazebo attachment fallback.
+# They are never queried to locate a cube or choose a pickup bay.
 CATEGORY_CUBE = {"food": "cube_0", "daily": "cube_1", "electronics": "cube_2"}
 CATEGORY_ALIASES = {
     "food": "food", "foods": "food", "食品": "food", "食品类": "food",
@@ -57,34 +58,13 @@ WAREHOUSES = {
     "electronics": ("电子产品生产车间", (2.55, -2.22, 0.0)),
 }
 
-# Successful left-bay calibration.  Values are target-minus-car in world/map.
-LEFT_REFERENCE_YAW = 3.141157
-LEFT_TARGET_MINUS_CAR = (-0.319277, 0.000771)
-
-
 def clamp(value, lower, upper):
     return max(lower, min(value, upper))
-
-
-def wrap(angle):
-    return math.atan2(math.sin(angle), math.cos(angle))
-
-
-def yaw_from_quaternion(quaternion):
-    return transformations.euler_from_quaternion(
-        [quaternion.x, quaternion.y, quaternion.z, quaternion.w]
-    )[2]
 
 
 def quaternion_from_yaw(yaw):
     x, y, z, w = transformations.quaternion_from_euler(0.0, 0.0, yaw)
     return Quaternion(x=x, y=y, z=z, w=w)
-
-
-def rotate_2d(x, y, yaw):
-    cosine = math.cos(yaw)
-    sine = math.sin(yaw)
-    return cosine * x - sine * y, sine * x + cosine * y
 
 
 class PickDeliverTask:
@@ -109,19 +89,56 @@ class PickDeliverTask:
         self.arm_grasp_duration = float(rospy.get_param("~arm_grasp_duration", 2.0))
         self.arm_carry_duration = float(rospy.get_param("~arm_carry_duration", 2.5))
         self.nav_timeout = float(rospy.get_param("~nav_timeout", 110.0))
-        self.fine_align_timeout = float(rospy.get_param("~fine_align_timeout", 12.0))
-        self.fine_align_position_tolerance = float(
-            rospy.get_param("~fine_align_position_tolerance", 0.008)
-        )
-        self.fine_align_yaw_tolerance = float(
-            rospy.get_param("~fine_align_yaw_tolerance", 0.025)
-        )
         self.camera_topic = rospy.get_param("~camera_topic", "/camera/rgb/image_raw")
-        self.camera_timeout = float(rospy.get_param("~camera_timeout", 1.0))
+        self.vision_model_path = os.path.abspath(
+            os.path.expanduser(str(rospy.get_param("~vision_model_path")))
+        )
+        self.vision_label_guard_path = os.path.abspath(
+            os.path.expanduser(str(rospy.get_param("~vision_label_guard_path")))
+        )
+        self.vision_class_names = [
+            str(name) for name in rospy.get_param(
+                "~vision_class_names", ["food", "daily", "electronics"]
+            )
+        ]
+        if self.category not in self.vision_class_names:
+            raise rospy.ROSException(
+                "Requested category %s is absent from vision_class_names=%s"
+                % (self.category, self.vision_class_names)
+            )
+        self.target_class_id = self.vision_class_names.index(self.category)
+        self.vision_confidence = float(
+            rospy.get_param("~vision_confidence_threshold", 0.20)
+        )
+        self.vision_nms = float(rospy.get_param("~vision_nms_threshold", 0.45))
+        self.vision_input_size = int(rospy.get_param("~vision_input_size", 640))
+        self.vision_scan_timeout = float(rospy.get_param("~vision_scan_timeout", 8.0))
+        self.vision_scan_stable_frames = int(
+            rospy.get_param("~vision_scan_stable_frames", 4)
+        )
+        self.vision_align_timeout = float(rospy.get_param("~vision_align_timeout", 25.0))
+        self.vision_lost_timeout = float(rospy.get_param("~vision_lost_timeout", 2.5))
+        self.vision_align_stable_frames = int(
+            rospy.get_param("~vision_align_stable_frames", 5)
+        )
+        self.vision_forward_gain = float(rospy.get_param("~vision_forward_gain", 0.45))
+        self.vision_angular_gain = float(rospy.get_param("~vision_angular_gain", 1.80))
+        self.vision_max_forward = float(
+            rospy.get_param("~vision_max_forward_speed", 0.08)
+        )
+        self.vision_max_angular = float(
+            rospy.get_param("~vision_max_angular_speed", 0.40)
+        )
+        self.search_regions = self._read_search_regions(
+            rospy.get_param("~vision_search_regions")
+        )
 
         self.arm_pub = rospy.Publisher("/arm_controller/command", JointTrajectory, queue_size=1)
         self.gripper_pub = rospy.Publisher("/gripper_controller/command", Float64, queue_size=1)
         self.cmd_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
+        self.vision_debug_pub = rospy.Publisher(
+            "/sim_task3/vision/debug_image", Image, queue_size=1
+        )
         self.status_pub = rospy.Publisher("/sim_task3/status", String, queue_size=10, latch=True)
         self.done_pub = rospy.Publisher("/sim_task3/done", Bool, queue_size=1, latch=True)
         self.carry_mode_pub = rospy.Publisher(
@@ -134,7 +151,9 @@ class PickDeliverTask:
             "/sim_task3/arm_control_enabled", Bool, queue_size=1, latch=False
         )
 
-        self.camera_frames = 0
+        self.image_lock = threading.Lock()
+        self.latest_image = None
+        self.latest_image_sequence = 0
         self.grasp_state = "UNKNOWN"
         self.fallback_holding = False
         self.fallback_hold_timer = None
@@ -148,10 +167,10 @@ class PickDeliverTask:
         self.list_controllers = rospy.ServiceProxy(
             "/controller_manager/list_controllers", ListControllers
         )
-        self.get_model = rospy.ServiceProxy("/gazebo/get_model_state", GetModelState)
         self.get_link = rospy.ServiceProxy("/gazebo/get_link_state", GetLinkState)
         self.set_model = rospy.ServiceProxy("/gazebo/set_model_state", SetModelState)
         self.clear_costmaps = rospy.ServiceProxy("/move_base/clear_costmaps", Empty)
+        self._load_vision_model()
         # A fresh task must never inherit low-speed mode from an earlier run.
         self.carry_mode_pub.publish(Bool(data=False))
 
@@ -182,8 +201,156 @@ class PickDeliverTask:
             raise rospy.ROSException("%s must contain five joint angles" % name)
         return [float(value) for value in pose]
 
-    def _camera_callback(self, _message):
-        self.camera_frames += 1
+    @staticmethod
+    def _read_search_regions(regions):
+        if not isinstance(regions, list) or len(regions) != 3:
+            raise rospy.ROSException(
+                "vision_search_regions must contain left, middle, and right entries"
+            )
+        parsed = []
+        for region in regions:
+            if not isinstance(region, dict):
+                raise rospy.ROSException("each vision search region must be a mapping")
+            missing = [
+                key for key in (
+                    "name", "display_name", "observation_goal",
+                    "grasp_target", "grasp_acceptance",
+                )
+                if key not in region
+            ]
+            if missing:
+                raise rospy.ROSException(
+                    "vision region is missing keys: %s" % ", ".join(missing)
+                )
+            goal = [float(value) for value in region["observation_goal"]]
+            target = [float(value) for value in region["grasp_target"]]
+            if len(goal) != 3 or len(target) != 4:
+                raise rospy.ROSException(
+                    "%s observation_goal/grasp_target dimensions are invalid"
+                    % region["name"]
+                )
+            acceptance = {}
+            for key in ("center_x", "center_y", "width", "height"):
+                values = [
+                    float(value) for value in region["grasp_acceptance"].get(key, [])
+                ]
+                if len(values) != 2 or values[0] > values[1]:
+                    raise rospy.ROSException(
+                        "%s grasp_acceptance.%s must be [minimum, maximum]"
+                        % (region["name"], key)
+                    )
+                acceptance[key] = values
+            parsed.append({
+                "name": str(region["name"]),
+                "display_name": str(region["display_name"]),
+                "observation_goal": goal,
+                "grasp_target": target,
+                "grasp_acceptance": acceptance,
+            })
+        if [region["name"] for region in parsed] != ["left", "middle", "right"]:
+            raise rospy.ROSException(
+                "vision_search_regions order must be exactly left, middle, right"
+            )
+        return parsed
+
+    def _load_vision_model(self):
+        if not os.path.isfile(self.vision_model_path):
+            raise rospy.ROSException(
+                "YOLOv5 ONNX model does not exist: %s" % self.vision_model_path
+            )
+        if not os.path.isfile(self.vision_label_guard_path):
+            raise rospy.ROSException(
+                "visual label guard does not exist: %s"
+                % self.vision_label_guard_path
+            )
+        try:
+            import onnxruntime as ort
+        except ImportError as error:
+            raise rospy.ROSException(
+                "onnxruntime is required; from the workspace root run "
+                "'python3 -m pip install -r requirements-vision.txt'"
+            ) from error
+
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = max(1, int(rospy.get_param("~vision_cpu_threads", 2)))
+        options.inter_op_num_threads = 1
+        self.vision_session = ort.InferenceSession(
+            self.vision_model_path,
+            sess_options=options,
+            providers=["CPUExecutionProvider"],
+        )
+        inputs = self.vision_session.get_inputs()
+        outputs = self.vision_session.get_outputs()
+        if len(inputs) != 1 or not outputs:
+            raise rospy.ROSException("unexpected YOLOv5 ONNX input/output signature")
+        self.vision_input_name = inputs[0].name
+        self.vision_output_name = outputs[0].name
+        self.vision_hog = cv2.HOGDescriptor(
+            (64, 64), (16, 16), (8, 8), (8, 8), 9
+        )
+        self.vision_label_guard = cv2.ml.SVM_load(self.vision_label_guard_path)
+        if self.vision_label_guard.getVarCount() != self.vision_hog.getDescriptorSize():
+            raise rospy.ROSException(
+                "visual label guard feature count does not match HOG descriptor"
+            )
+        warmup = np.zeros(
+            (1, 3, self.vision_input_size, self.vision_input_size), dtype=np.float32
+        )
+        output = self.vision_session.run(
+            [self.vision_output_name], {self.vision_input_name: warmup}
+        )[0]
+        if output.ndim != 3 or output.shape[-1] != 5 + len(self.vision_class_names):
+            raise rospy.ROSException(
+                "YOLOv5 output shape %s does not match %d configured classes"
+                % (output.shape, len(self.vision_class_names))
+            )
+        self._status(
+            "YOLOv5 vision ready: %s; classes=%s"
+            % (os.path.basename(self.vision_model_path), ",".join(self.vision_class_names))
+        )
+
+    @staticmethod
+    def _image_message_to_bgr(message):
+        encoding = str(message.encoding).lower()
+        channels = {
+            "bgr8": 3,
+            "rgb8": 3,
+            "bgra8": 4,
+            "rgba8": 4,
+            "mono8": 1,
+        }.get(encoding)
+        if channels is None:
+            raise ValueError("unsupported camera encoding %s" % message.encoding)
+        row_bytes = int(message.width) * channels
+        if int(message.step) < row_bytes:
+            raise ValueError("camera image step is shorter than one pixel row")
+        raw = np.frombuffer(message.data, dtype=np.uint8)
+        needed = int(message.height) * int(message.step)
+        if raw.size < needed:
+            raise ValueError("camera image data is truncated")
+        rows = raw[:needed].reshape((int(message.height), int(message.step)))
+        pixels = rows[:, :row_bytes].reshape(
+            (int(message.height), int(message.width), channels)
+        )
+        if encoding == "bgr8":
+            return pixels.copy()
+        if encoding == "rgb8":
+            return pixels[:, :, ::-1].copy()
+        if encoding == "bgra8":
+            return pixels[:, :, :3].copy()
+        if encoding == "rgba8":
+            return pixels[:, :, [2, 1, 0]].copy()
+        return cv2.cvtColor(pixels, cv2.COLOR_GRAY2BGR)
+
+    def _camera_callback(self, message):
+        try:
+            image = self._image_message_to_bgr(message)
+        except (ValueError, TypeError) as error:
+            rospy.logwarn_throttle(2.0, "Camera frame rejected: %s" % error)
+            return
+        with self.image_lock:
+            self.latest_image = image
+            self.latest_image_sequence += 1
 
     def _grasp_state_callback(self, message):
         self.grasp_state = message.data
@@ -194,7 +361,6 @@ class PickDeliverTask:
 
     def _wait_for_services(self):
         for name in (
-            "/gazebo/get_model_state",
             "/gazebo/get_link_state",
             "/gazebo/set_model_state",
             "/controller_manager/switch_controller",
@@ -205,44 +371,445 @@ class PickDeliverTask:
         self._status("Waiting for move_base")
         self.nav.wait_for_server()
 
-    def _cube_poses(self):
-        poses = {}
-        for model in ALL_CUBES:
-            response = self.get_model(model, "world")
-            if not response.success:
-                raise rospy.ROSException("target model %s has not spawned" % model)
-            poses[model] = response.pose
-        return poses
+    def _latest_frame(self, after_sequence):
+        with self.image_lock:
+            if (
+                self.latest_image is None
+                or self.latest_image_sequence == after_sequence
+            ):
+                return None
+            return self.latest_image_sequence, self.latest_image.copy()
 
-    def _recognise_and_project_pickup(self):
-        start_frames = self.camera_frames
-        deadline = time.time() + self.camera_timeout
-        while not rospy.is_shutdown() and time.time() < deadline and self.camera_frames == start_frames:
-            rospy.sleep(0.05)
+    def _letterbox(self, image):
+        height, width = image.shape[:2]
+        scale = min(
+            float(self.vision_input_size) / float(width),
+            float(self.vision_input_size) / float(height),
+        )
+        resized_width = int(round(width * scale))
+        resized_height = int(round(height * scale))
+        resized = cv2.resize(
+            image, (resized_width, resized_height), interpolation=cv2.INTER_LINEAR
+        )
+        pad_x = (self.vision_input_size - resized_width) // 2
+        pad_y = (self.vision_input_size - resized_height) // 2
+        canvas = np.full(
+            (self.vision_input_size, self.vision_input_size, 3), 114, dtype=np.uint8
+        )
+        canvas[
+            pad_y:pad_y + resized_height, pad_x:pad_x + resized_width
+        ] = resized
+        rgb = canvas[:, :, ::-1].transpose((2, 0, 1))
+        blob = np.ascontiguousarray(rgb, dtype=np.float32) / 255.0
+        return blob[np.newaxis, :], scale, pad_x, pad_y
 
-        poses = self._cube_poses()
-        ordered = sorted(ALL_CUBES, key=lambda model: poses[model].position.x)
-        region_index = ordered.index(self.cargo_model)
-        region_name = ("left", "upper", "right")[region_index]
-        # Each bay is one clockwise 90-degree rotation from the previous one.
-        pickup_yaw = wrap(LEFT_REFERENCE_YAW - region_index * math.pi / 2.0)
-        local_dx, local_dy = rotate_2d(
-            LEFT_TARGET_MINUS_CAR[0], LEFT_TARGET_MINUS_CAR[1], -LEFT_REFERENCE_YAW
+    def _guard_classify(self, image, box):
+        x1, y1, x2, y2 = [float(value) for value in box]
+        width = x2 - x1
+        height = y2 - y1
+        x1 = max(0, int(round(x1 - 0.10 * width)))
+        y1 = max(0, int(round(y1 - 0.08 * height)))
+        x2 = min(image.shape[1], int(round(x2 + 0.10 * width)))
+        y2 = min(image.shape[0], int(round(y2 + 0.08 * height)))
+        crop = image[y1:y2, x1:x2]
+        if crop.size == 0:
+            return None
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        gray = cv2.resize(gray, (64, 64), interpolation=cv2.INTER_AREA)
+        gray = cv2.equalizeHist(gray)
+        feature = self.vision_hog.compute(gray).reshape(1, -1).astype(np.float32)
+        class_id = int(self.vision_label_guard.predict(feature)[1][0, 0])
+        if class_id < 0 or class_id >= len(self.vision_class_names):
+            return None
+        return class_id
+
+    def _detect(self, image, region):
+        blob, scale, pad_x, pad_y = self._letterbox(image)
+        output = self.vision_session.run(
+            [self.vision_output_name], {self.vision_input_name: blob}
+        )[0]
+        rows = np.squeeze(output, axis=0)
+        if rows.shape[0] <= 5 + len(self.vision_class_names):
+            rows = rows.transpose()
+
+        image_height, image_width = image.shape[:2]
+        candidates = []
+        for row in rows:
+            objectness = float(row[4])
+            if objectness < self.vision_confidence:
+                continue
+            class_scores = row[5:5 + len(self.vision_class_names)]
+            class_id = int(np.argmax(class_scores))
+            confidence = objectness * float(class_scores[class_id])
+            if confidence < self.vision_confidence:
+                continue
+
+            center_x, center_y, box_width, box_height = [
+                float(value) for value in row[:4]
+            ]
+            x1 = clamp((center_x - box_width / 2.0 - pad_x) / scale, 0.0, image_width - 1.0)
+            y1 = clamp((center_y - box_height / 2.0 - pad_y) / scale, 0.0, image_height - 1.0)
+            x2 = clamp((center_x + box_width / 2.0 - pad_x) / scale, 0.0, image_width - 1.0)
+            y2 = clamp((center_y + box_height / 2.0 - pad_y) / scale, 0.0, image_height - 1.0)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            candidates.append({
+                "yolo_class_id": class_id,
+                "yolo_class_name": self.vision_class_names[class_id],
+                "confidence": confidence,
+                "box_px": [x1, y1, x2, y2],
+                "nms_box": [
+                    int(round(x1)), int(round(y1)),
+                    int(round(x2 - x1)), int(round(y2 - y1)),
+                ],
+            })
+
+        detections = []
+        indices = cv2.dnn.NMSBoxes(
+            [item["nms_box"] for item in candidates],
+            [item["confidence"] for item in candidates],
+            self.vision_confidence,
+            self.vision_nms,
+        ) if candidates else []
+        for index in np.asarray(indices).reshape(-1):
+            item = candidates[int(index)]
+            class_id = self._guard_classify(image, item["box_px"])
+            if class_id is None:
+                continue
+            item["class_id"] = class_id
+            item["class_name"] = self.vision_class_names[class_id]
+            x1, y1, x2, y2 = item["box_px"]
+            item["center_x"] = ((x1 + x2) / 2.0) / float(image_width)
+            item["center_y"] = ((y1 + y2) / 2.0) / float(image_height)
+            item["width"] = (x2 - x1) / float(image_width)
+            item["height"] = (y2 - y1) / float(image_height)
+            detections.append(item)
+        detections.sort(key=lambda item: item["confidence"], reverse=True)
+        self._publish_vision_debug(image, detections, region)
+        return detections
+
+    def _publish_vision_debug(self, image, detections, region):
+        annotated = image.copy()
+        image_height, image_width = annotated.shape[:2]
+        target = region["grasp_target"]
+        target_x = int(round(target[0] * image_width))
+        target_y = int(round(target[1] * image_height))
+        target_w = int(round(target[2] * image_width))
+        target_h = int(round(target[3] * image_height))
+        cv2.rectangle(
+            annotated,
+            (target_x - target_w // 2, target_y - target_h // 2),
+            (target_x + target_w // 2, target_y + target_h // 2),
+            (255, 255, 0),
+            2,
         )
-        target_minus_car_x, target_minus_car_y = rotate_2d(local_dx, local_dy, pickup_yaw)
-        target_pose = poses[self.cargo_model]
-        pickup_goal = (
-            target_pose.position.x - target_minus_car_x,
-            target_pose.position.y - target_minus_car_y,
-            pickup_yaw,
+        cv2.drawMarker(
+            annotated,
+            (target_x, target_y),
+            (255, 255, 0),
+            markerType=cv2.MARKER_CROSS,
+            markerSize=18,
+            thickness=2,
         )
-        camera_note = "camera frame received" if self.camera_frames > start_frames else "Gazebo label fallback"
+        for detection in detections:
+            x1, y1, x2, y2 = [int(round(value)) for value in detection["box_px"]]
+            colour = (
+                (0, 220, 0)
+                if detection["class_id"] == self.target_class_id
+                else (0, 150, 255)
+            )
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), colour, 2)
+            cv2.putText(
+                annotated,
+                "%s (yolo:%s %.2f)"
+                % (
+                    detection["class_name"],
+                    detection["yolo_class_name"],
+                    detection["confidence"],
+                ),
+                (x1, max(18, y1 - 6)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                colour,
+                2,
+                cv2.LINE_AA,
+            )
+        message = Image()
+        message.header.stamp = rospy.Time.now()
+        message.header.frame_id = "camera_rgb_optical_frame"
+        message.height = image_height
+        message.width = image_width
+        message.encoding = "bgr8"
+        message.is_bigendian = 0
+        message.step = image_width * 3
+        message.data = annotated.tobytes()
+        self.vision_debug_pub.publish(message)
+
+    def _scan_region(self, region):
+        deadline = time.time() + self.vision_scan_timeout
+        last_sequence = -1
+        stable_frames = 0
+        stable_class_id = None
+        seen = {}
+        rate = rospy.Rate(20)
+        try:
+            while not rospy.is_shutdown() and time.time() < deadline:
+                frame = self._latest_frame(last_sequence)
+                if frame is None:
+                    rate.sleep()
+                    continue
+                last_sequence, image = frame
+                detections = self._detect(image, region)
+                if not detections:
+                    stable_frames = 0
+                    self.cmd_pub.publish(Twist())
+                    rate.sleep()
+                    continue
+
+                cube = detections[0]
+                seen[cube["class_name"]] = seen.get(cube["class_name"], 0) + 1
+                horizontal_error = region["grasp_target"][0] - cube["center_x"]
+                if abs(horizontal_error) > 0.030:
+                    stable_frames = 0
+                    stable_class_id = None
+                    command = Twist()
+                    command.angular.z = clamp(
+                        self.vision_angular_gain * horizontal_error,
+                        -0.25,
+                        0.25,
+                    )
+                    command.angular.z = self._ensure_minimum_speed(
+                        command.angular.z, 0.055
+                    )
+                    self.cmd_pub.publish(command)
+                    rate.sleep()
+                    continue
+
+                self.cmd_pub.publish(Twist())
+                if cube["class_id"] == stable_class_id:
+                    stable_frames += 1
+                else:
+                    stable_class_id = cube["class_id"]
+                    stable_frames = 1
+                if stable_frames >= self.vision_scan_stable_frames:
+                    self._status(
+                        "Camera classified %s region as %s "
+                        "(YOLO raw=%s, confidence=%.3f)"
+                        % (
+                            region["display_name"],
+                            cube["class_name"],
+                            cube["yolo_class_name"],
+                            cube["confidence"],
+                        )
+                    )
+                    if cube["class_id"] != self.target_class_id:
+                        return None
+                    self._status(
+                        "YOLOv5 recognised %s in %s region: confidence=%.3f"
+                        % (
+                            self.category,
+                            region["display_name"],
+                            cube["confidence"],
+                        )
+                    )
+                    return cube
+                rate.sleep()
+        finally:
+            self.cmd_pub.publish(Twist())
+        seen_text = ", ".join(
+            "%s=%d" % item for item in sorted(seen.items())
+        ) or "none"
         self._status(
-            "%s: %s -> %s; region=%s; pickup=(%.4f, %.4f, %.4f)"
-            % (camera_note, self.cargo_name, self.cargo_model, region_name,
-               pickup_goal[0], pickup_goal[1], pickup_goal[2])
+            "No %s detected in %s region; seen: %s"
+            % (self.category, region["display_name"], seen_text)
         )
-        return pickup_goal, region_name
+        return None
+
+    @staticmethod
+    def _inside_grasp_range(detection, region):
+        acceptance = region["grasp_acceptance"]
+        values = {
+            "center_x": detection["center_x"],
+            "center_y": detection["center_y"],
+            "width": detection["width"],
+            "height": detection["height"],
+        }
+        return all(
+            acceptance[key][0] <= value <= acceptance[key][1]
+            for key, value in values.items()
+        )
+
+    @staticmethod
+    def _ensure_minimum_speed(value, minimum):
+        if value == 0.0 or abs(value) >= minimum:
+            return value
+        return math.copysign(minimum, value)
+
+    def _vision_align(self, region, initial_detection):
+        target = region["grasp_target"]
+        deadline = time.time() + self.vision_align_timeout
+        last_seen = time.time()
+        last_sequence = -1
+        last_horizontal_error = target[0] - initial_detection["center_x"]
+        tracked_center = (
+            initial_detection["center_x"],
+            initial_detection["center_y"],
+        )
+        stable_frames = 0
+        rate = rospy.Rate(20)
+        self._status(
+            "Visual servo active in %s region; target box=(%.3f, %.3f, %.3f, %.3f)"
+            % (
+                region["display_name"],
+                target[0], target[1], target[2], target[3],
+            )
+        )
+        try:
+            while not rospy.is_shutdown() and time.time() < deadline:
+                frame = self._latest_frame(last_sequence)
+                if frame is None:
+                    rate.sleep()
+                    continue
+                last_sequence, image = frame
+                detections = self._detect(image, region)
+                if detections:
+                    detection = min(
+                        detections,
+                        key=lambda item: (
+                            (item["center_x"] - tracked_center[0]) ** 2
+                            + (item["center_y"] - tracked_center[1]) ** 2
+                        ),
+                    )
+                    tracking_distance = math.hypot(
+                        detection["center_x"] - tracked_center[0],
+                        detection["center_y"] - tracked_center[1],
+                    )
+                    if tracking_distance > 0.25:
+                        detection = None
+                else:
+                    detection = None
+                if detection is None:
+                    stable_frames = 0
+                    missing_for = time.time() - last_seen
+                    if missing_for >= self.vision_lost_timeout:
+                        self._status(
+                            "Visual alignment lost the selected cube for %.1f seconds"
+                            % missing_for
+                        )
+                        return False
+                    command = Twist()
+                    if missing_for >= 0.5 and last_horizontal_error != 0.0:
+                        command.angular.z = math.copysign(0.10, last_horizontal_error)
+                    self.cmd_pub.publish(command)
+                    rate.sleep()
+                    continue
+
+                last_seen = time.time()
+                tracked_center = (
+                    detection["center_x"],
+                    detection["center_y"],
+                )
+                horizontal_error = target[0] - detection["center_x"]
+                vertical_error = target[1] - detection["center_y"]
+                height_error = target[3] - detection["height"]
+                last_horizontal_error = horizontal_error
+
+                if self._inside_grasp_range(detection, region):
+                    stable_frames += 1
+                    self.cmd_pub.publish(Twist())
+                    if stable_frames >= self.vision_align_stable_frames:
+                        self._status(
+                            "Visual grasp range reached in %s: "
+                            "box=(%.3f, %.3f, %.3f, %.3f), confidence=%.3f"
+                            % (
+                                region["display_name"],
+                                detection["center_x"],
+                                detection["center_y"],
+                                detection["width"],
+                                detection["height"],
+                                detection["confidence"],
+                            )
+                        )
+                        return True
+                    rate.sleep()
+                    continue
+
+                stable_frames = 0
+                command = Twist()
+                command.angular.z = clamp(
+                    self.vision_angular_gain * horizontal_error,
+                    -self.vision_max_angular,
+                    self.vision_max_angular,
+                )
+                if abs(horizontal_error) > 0.020:
+                    command.angular.z = self._ensure_minimum_speed(
+                        command.angular.z, 0.055
+                    )
+                else:
+                    command.angular.z = 0.0
+
+                if abs(horizontal_error) <= 0.080:
+                    distance_error = vertical_error + 0.45 * height_error
+                    command.linear.x = clamp(
+                        self.vision_forward_gain * distance_error,
+                        -self.vision_max_forward,
+                        self.vision_max_forward,
+                    )
+                    if abs(distance_error) > 0.020:
+                        command.linear.x = self._ensure_minimum_speed(
+                            command.linear.x, 0.020
+                        )
+                self.cmd_pub.publish(command)
+                rospy.loginfo_throttle(
+                    1.0,
+                    "Vision servo %s: cx=%.3f cy=%.3f w=%.3f h=%.3f "
+                    "cmd=(%.3f, %.3f)"
+                    % (
+                        region["name"],
+                        detection["center_x"],
+                        detection["center_y"],
+                        detection["width"],
+                        detection["height"],
+                        command.linear.x,
+                        command.angular.z,
+                    ),
+                )
+                rate.sleep()
+        finally:
+            self.cmd_pub.publish(Twist())
+        self._status("Visual alignment timed out in %s region" % region["display_name"])
+        return False
+
+    def _find_and_align_target(self):
+        for region in self.search_regions:
+            if not self._move_base(
+                region["observation_goal"],
+                "%s visual observation pose" % region["display_name"],
+            ):
+                self._status(
+                    "Cannot reach %s observation pose; continuing search"
+                    % region["display_name"]
+                )
+                continue
+            self.cmd_pub.publish(Twist())
+            self._status(
+                "Scanning %s region for %s with YOLOv5"
+                % (region["display_name"], self.category)
+            )
+            detection = self._scan_region(region)
+            if detection is None:
+                continue
+            self.nav.cancel_all_goals()
+            if not self._vision_align(region, detection):
+                raise rospy.ROSException(
+                    "found %s but could not visually align in %s region"
+                    % (self.category, region["display_name"])
+                )
+            return region
+        raise rospy.ROSException(
+            "YOLOv5 could not find category %s in left/middle/right regions"
+            % self.category
+        )
 
     def _move_base(self, goal, description):
         message = MoveBaseGoal()
@@ -268,50 +835,6 @@ class PickDeliverTask:
             except rospy.ServiceException:
                 pass
             rospy.sleep(1.0)
-        return False
-
-    def _robot_pose(self):
-        response = self.get_model("car3", "world")
-        if not response.success:
-            raise rospy.ROSException("could not read car3 pose")
-        return response.pose
-
-    def _fine_align_base(self, goal):
-        """Use low-speed omnidirectional correction after move_base is done.
-
-        The calibrated grasp box is only 2 cm wide.  move_base's terminal
-        tolerance is intentionally looser, so this final correction uses the
-        live Gazebo car pose instead of teleporting the vehicle.
-        """
-        deadline = time.time() + self.fine_align_timeout
-        rate = rospy.Rate(20)
-        try:
-            while not rospy.is_shutdown() and time.time() < deadline:
-                pose = self._robot_pose()
-                yaw = yaw_from_quaternion(pose.orientation)
-                dx = goal[0] - pose.position.x
-                dy = goal[1] - pose.position.y
-                distance = math.hypot(dx, dy)
-                yaw_error = wrap(goal[2] - yaw)
-                if (distance <= self.fine_align_position_tolerance and
-                        abs(yaw_error) <= self.fine_align_yaw_tolerance):
-                    self._status(
-                        "Projected pickup pose aligned: xy_error=%.4f m yaw_error=%.4f rad"
-                        % (distance, yaw_error)
-                    )
-                    return True
-                forward, lateral = rotate_2d(dx, dy, -yaw)
-                command = Twist()
-                command.linear.x = clamp(1.8 * forward, -0.12, 0.12)
-                command.linear.y = clamp(1.8 * lateral, -0.12, 0.12)
-                command.angular.z = clamp(2.2 * yaw_error, -0.60, 0.60)
-                self.cmd_pub.publish(command)
-                rate.sleep()
-        finally:
-            self.cmd_pub.publish(Twist())
-        pose = self._robot_pose()
-        error = math.hypot(goal[0] - pose.position.x, goal[1] - pose.position.y)
-        self._status("Projected pickup fine alignment timed out at %.4f m error" % error)
         return False
 
     def _start_arm_control(self):
@@ -399,7 +922,7 @@ class PickDeliverTask:
             pass
 
     def _pick(self):
-        self._status("Opening gripper and moving camera/gripper to the projected cube")
+        self._status("Opening gripper and moving camera/gripper to the visually aligned cube")
         self._set_gripper(1.0)
         self._wait_for_grasp_state("IDLE", 1.0)
         self._move_arm(self.arm_grasp, self.arm_grasp_duration)
@@ -430,11 +953,11 @@ class PickDeliverTask:
 
     def run(self):
         self._wait_for_services()
-        pickup_goal, region = self._recognise_and_project_pickup()
-        if not self._move_base(pickup_goal, "%s pickup bay" % region):
-            raise rospy.ROSException("cannot reach the projected %s pickup bay" % region)
-        if not self._fine_align_base(pickup_goal):
-            raise rospy.ROSException("cannot precisely align at the %s pickup pose" % region)
+        region = self._find_and_align_target()
+        self._status(
+            "%s was selected from camera recognition in %s region"
+            % (self.cargo_name, region["display_name"])
+        )
         self._start_arm_control()
         self._pick()
         if not self._move_base(self.destination, self.destination_name):

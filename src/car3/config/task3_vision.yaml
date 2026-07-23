@@ -1,0 +1,60 @@
+# YOLOv5 visual pickup configuration.
+#
+# The recorded boxes below are from the arm-stationary bottom_center samples
+# captured at the previously verified graspable base poses.  Coordinates are
+# normalised by the 640x480 camera image.  Runtime never reads a cube's Gazebo
+# pose: it visits these three fixed observation poses in left/middle/right
+# order, recognises the requested class, and drives the detected box into the
+# corresponding acceptance range.
+
+vision_class_names: [food, daily, electronics]
+vision_confidence_threshold: 0.20
+vision_nms_threshold: 0.45
+vision_input_size: 640
+vision_scan_timeout: 8.0
+vision_scan_stable_frames: 4
+vision_align_timeout: 25.0
+vision_lost_timeout: 2.5
+vision_align_stable_frames: 5
+vision_forward_gain: 0.45
+vision_angular_gain: 1.80
+vision_max_forward_speed: 0.08
+vision_max_angular_speed: 0.40
+
+vision_search_regions:
+  - name: left
+    display_name: 左侧
+    observation_goal: [-1.510723, -0.445771, 3.141157]
+    recorded_image_size: [640, 480]
+    recorded_bbox_px: [291.60, 317.50, 355.40, 390.00]
+    # YOLO box on the recorded graspable frame.
+    grasp_target: [0.4965, 0.7399, 0.1134, 0.1756]
+    grasp_acceptance:
+      center_x: [0.470, 0.535]
+      center_y: [0.710, 0.770]
+      width: [0.085, 0.140]
+      height: [0.140, 0.195]
+
+  - name: middle
+    display_name: 中间
+    observation_goal: [-1.395771, -0.419277, 1.570361]
+    recorded_image_size: [640, 480]
+    recorded_bbox_px: [291.60, 317.55, 355.40, 388.60]
+    grasp_target: [0.4915, 0.7332, 0.1183, 0.1730]
+    grasp_acceptance:
+      center_x: [0.470, 0.535]
+      center_y: [0.710, 0.770]
+      width: [0.085, 0.140]
+      height: [0.140, 0.195]
+
+  - name: right
+    display_name: 右侧
+    observation_goal: [-1.359277, -0.524229, -0.000436]
+    recorded_image_size: [640, 480]
+    recorded_bbox_px: [291.60, 317.55, 355.40, 388.60]
+    grasp_target: [0.5033, 0.7442, 0.1079, 0.1660]
+    grasp_acceptance:
+      center_x: [0.470, 0.535]
+      center_y: [0.710, 0.770]
+      width: [0.085, 0.140]
+      height: [0.140, 0.195]

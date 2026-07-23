@@ -1,0 +1,27 @@
+{
+  "format": "ONNX",
+  "opset": 12,
+  "input": {
+    "name": "images",
+    "shape": [1, 3, 640, 640],
+    "letterbox_value": 114
+  },
+  "output_shape": [1, 25200, 8],
+  "classes": {
+    "0": "food",
+    "1": "daily",
+    "2": "electronics"
+  },
+  "source_checkpoint": "cube_yolov5_best.pt",
+  "source_checkpoint_sha256": "CF95221F1F58AA9322F045EEC245CF14D04BD19E5ECCFF1A50FC6150898BE936",
+  "onnx_sha256": "7562DFF883B90D015A4C34211492C3209E229418D01C56EB38098CBD8F78EDFC",
+  "exporter": "ultralytics/yolov5 v7.0",
+  "runtime": "onnxruntime 1.16.3",
+  "label_guard": {
+    "file": "cube_label_hog_svm.xml",
+    "sha256": "1E27874CCDF70C7D6BD9954EAB380B695508E29354011D519722CDCDE64CA079",
+    "features": "64x64 grayscale HOG",
+    "training_boxes": "YOLOv5 detections on the 27 captured grid samples",
+    "purpose": "reject class-head mix-ups while retaining YOLOv5 localisation"
+  }
+}

@@ -4,6 +4,15 @@
 
 在 Ubuntu 20.04 安装 ROS Noetic Desktop-Full，并确保可使用 Gazebo、RViz、`move_base` 与 `catkin_make`。本项目面向 ROS 1 Noetic；不要将预编译二进制从其他 ROS 发行版混用。
 
+任务三的 YOLOv5 权重已经导出为 ONNX。Ubuntu 20.04 需要安装一次视觉运行时：
+
+```bash
+# 在工作区根目录执行
+sudo apt-get update
+sudo apt-get install -y python3-pip python3-opencv
+python3 -m pip install -r requirements-vision.txt
+```
+
 ## 2. 构建工作区
 
 ```bash
@@ -49,7 +58,7 @@ roslaunch car3 task3_prepare.launch gui:=true rviz:=true
 roslaunch car3 task3_execute.launch cargo_item:="苹果"
 ```
 
-环境启动时机械臂控制器保持关闭，避免车辆行驶抖动；任务节点抵达取物位并完成微调后才开启控制器。
+环境启动时机械臂控制器保持关闭，避免车辆行驶抖动；任务节点按左、中、右顺序用摄像头识别物块，并通过视觉闭环完成夹取对位后才开启控制器。
 
 ## 4. 可选清理启动脚本
 

@@ -1,0 +1,3 @@
+# Python 3.8 versions verified in the root Ubuntu-20.04 deployment.
+numpy==1.24.4
+onnxruntime==1.16.3
