@@ -24,6 +24,8 @@ class Task3VisualPipelineTest(unittest.TestCase):
         self.assertNotIn("GetModelState", source)
         self.assertNotIn("_cube_poses", source)
         self.assertNotIn("cube_world_poses", source)
+        self.assertNotIn("time.time()", source)
+        self.assertIn("rospy.Time.now()", source)
 
     def test_search_order_and_grasp_calibration_are_complete(self):
         config = yaml.safe_load(VISION_CONFIG.read_text(encoding="utf-8"))

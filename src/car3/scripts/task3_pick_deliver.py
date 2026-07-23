@@ -10,7 +10,6 @@ Gazebo cube positions are intentionally never read by this runtime node.
 import math
 import os
 import threading
-import time
 
 import actionlib
 import cv2
@@ -549,13 +548,13 @@ class PickDeliverTask:
         self.vision_debug_pub.publish(message)
 
     def _scan_region(self, region):
-        deadline = time.time() + self.vision_scan_timeout
+        deadline = rospy.Time.now() + rospy.Duration(self.vision_scan_timeout)
         last_sequence = -1
         class_votes = []
         seen = {}
         rate = rospy.Rate(20)
         try:
-            while not rospy.is_shutdown() and time.time() < deadline:
+            while not rospy.is_shutdown() and rospy.Time.now() < deadline:
                 frame = self._latest_frame(last_sequence)
                 if frame is None:
                     rate.sleep()
@@ -663,8 +662,8 @@ class PickDeliverTask:
 
     def _vision_align(self, region, initial_detection):
         target = region["grasp_target"]
-        deadline = time.time() + self.vision_align_timeout
-        last_seen = time.time()
+        deadline = rospy.Time.now() + rospy.Duration(self.vision_align_timeout)
+        last_seen = rospy.Time.now()
         last_sequence = -1
         last_horizontal_error = target[0] - initial_detection["center_x"]
         tracked_center = (
@@ -681,7 +680,7 @@ class PickDeliverTask:
             )
         )
         try:
-            while not rospy.is_shutdown() and time.time() < deadline:
+            while not rospy.is_shutdown() and rospy.Time.now() < deadline:
                 frame = self._latest_frame(last_sequence)
                 if frame is None:
                     rate.sleep()
@@ -706,7 +705,7 @@ class PickDeliverTask:
                     detection = None
                 if detection is None:
                     stable_frames = 0
-                    missing_for = time.time() - last_seen
+                    missing_for = (rospy.Time.now() - last_seen).to_sec()
                     if missing_for >= self.vision_lost_timeout:
                         self._status(
                             "Visual alignment lost the selected cube for %.1f seconds"
@@ -720,7 +719,7 @@ class PickDeliverTask:
                     rate.sleep()
                     continue
 
-                last_seen = time.time()
+                last_seen = rospy.Time.now()
                 tracked_center = (
                     detection["center_x"],
                     detection["center_y"],
@@ -913,8 +912,8 @@ class PickDeliverTask:
             rospy.sleep(0.08)
 
     def _wait_for_grasp_state(self, wanted, timeout):
-        deadline = time.time() + timeout
-        while not rospy.is_shutdown() and time.time() < deadline:
+        deadline = rospy.Time.now() + rospy.Duration(timeout)
+        while not rospy.is_shutdown() and rospy.Time.now() < deadline:
             if self.grasp_state == wanted:
                 return True
             rospy.sleep(0.05)
