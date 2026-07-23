@@ -19,6 +19,8 @@ vision_scan_timeout: 15.0
 vision_scan_center_tolerance: 0.060
 vision_classify_stable_frames: 7
 vision_classify_timeout: 5.0
+vision_template_min_score: 0.30
+vision_template_min_margin: 0.08
 vision_align_timeout: 25.0
 vision_lost_timeout: 2.5
 vision_align_stable_frames: 5

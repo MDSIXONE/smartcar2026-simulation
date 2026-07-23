@@ -17,11 +17,13 @@
   "onnx_sha256": "7562DFF883B90D015A4C34211492C3209E229418D01C56EB38098CBD8F78EDFC",
   "exporter": "ultralytics/yolov5 v7.0",
   "runtime": "onnxruntime 1.16.3",
-  "label_guard": {
-    "file": "cube_label_hog_svm.xml",
-    "sha256": "CDE74D969480EA139E701C695102E15D7B0FF137F756C25A8338E4EECF5C9209",
-    "features": "64x64 grayscale HOG",
-    "training_boxes": "YOLOv5 detections on 135 captured grid samples covering every class-region combination",
+  "label_verification": {
+    "method": "perspective-corrected printed-face template correlation",
+    "templates": [
+      "../cube/meshes/Food.png",
+      "../cube/meshes/Daily_Necessities.png",
+      "../cube/meshes/Electronics.png"
+    ],
     "purpose": "reject class-head mix-ups while retaining YOLOv5 localisation"
   }
 }

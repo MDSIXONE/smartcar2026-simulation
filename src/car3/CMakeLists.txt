@@ -26,7 +26,6 @@ catkin_install_python(PROGRAMS
   scripts/projected_cube_grasp_test.py
   scripts/set_arm_initial_pose.py
   scripts/task3_pick_deliver.py
-  scripts/build_label_guard.py
   scripts/capture_cube_dataset.py
   scripts/spawn_cubes.py
   scripts/odom_tf_broadcaster.py

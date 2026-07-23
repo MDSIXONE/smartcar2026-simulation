@@ -92,8 +92,8 @@ class PickDeliverTask:
         self.vision_model_path = os.path.abspath(
             os.path.expanduser(str(rospy.get_param("~vision_model_path")))
         )
-        self.vision_label_guard_path = os.path.abspath(
-            os.path.expanduser(str(rospy.get_param("~vision_label_guard_path")))
+        self.vision_label_template_dir = os.path.abspath(
+            os.path.expanduser(str(rospy.get_param("~vision_label_template_dir")))
         )
         self.vision_class_names = [
             str(name) for name in rospy.get_param(
@@ -120,6 +120,12 @@ class PickDeliverTask:
         )
         self.vision_classify_timeout = float(
             rospy.get_param("~vision_classify_timeout", 5.0)
+        )
+        self.vision_template_min_score = float(
+            rospy.get_param("~vision_template_min_score", 0.30)
+        )
+        self.vision_template_min_margin = float(
+            rospy.get_param("~vision_template_min_margin", 0.08)
         )
         self.vision_align_timeout = float(rospy.get_param("~vision_align_timeout", 25.0))
         self.vision_lost_timeout = float(rospy.get_param("~vision_lost_timeout", 2.5))
@@ -263,10 +269,10 @@ class PickDeliverTask:
             raise rospy.ROSException(
                 "YOLOv5 ONNX model does not exist: %s" % self.vision_model_path
             )
-        if not os.path.isfile(self.vision_label_guard_path):
+        if not os.path.isdir(self.vision_label_template_dir):
             raise rospy.ROSException(
-                "visual label guard does not exist: %s"
-                % self.vision_label_guard_path
+                "visual label template directory does not exist: %s"
+                % self.vision_label_template_dir
             )
         try:
             import onnxruntime as ort
@@ -290,13 +296,35 @@ class PickDeliverTask:
             raise rospy.ROSException("unexpected YOLOv5 ONNX input/output signature")
         self.vision_input_name = inputs[0].name
         self.vision_output_name = outputs[0].name
-        self.vision_hog = cv2.HOGDescriptor(
-            (64, 64), (16, 16), (8, 8), (8, 8), 9
-        )
-        self.vision_label_guard = cv2.ml.SVM_load(self.vision_label_guard_path)
-        if self.vision_label_guard.getVarCount() != self.vision_hog.getDescriptorSize():
-            raise rospy.ROSException(
-                "visual label guard feature count does not match HOG descriptor"
+        template_files = {
+            "food": "Food.png",
+            "daily": "Daily_Necessities.png",
+            "electronics": "Electronics.png",
+        }
+        self.vision_label_templates = []
+        for class_name in self.vision_class_names:
+            if class_name not in template_files:
+                raise rospy.ROSException(
+                    "no visual label template configured for class %s" % class_name
+                )
+            path = os.path.join(
+                self.vision_label_template_dir, template_files[class_name]
+            )
+            template = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+            if template is None:
+                raise rospy.ROSException(
+                    "cannot read visual label template: %s" % path
+                )
+            template = cv2.resize(
+                template, (128, 128), interpolation=cv2.INTER_AREA
+            )
+            self.vision_label_templates.append(
+                cv2.threshold(
+                    template,
+                    0,
+                    255,
+                    cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU,
+                )[1]
             )
         warmup = np.zeros(
             (1, 3, self.vision_input_size, self.vision_input_size), dtype=np.float32
@@ -408,25 +436,94 @@ class PickDeliverTask:
         blob = np.ascontiguousarray(rgb, dtype=np.float32) / 255.0
         return blob[np.newaxis, :], scale, pad_x, pad_y
 
-    def _guard_classify(self, image, box):
+    @staticmethod
+    def _ordered_quad(points):
+        points = points.reshape(-1, 2).astype(np.float32)
+        sums = points.sum(axis=1)
+        differences = np.diff(points, axis=1).reshape(-1)
+        return np.asarray(
+            [
+                points[np.argmin(sums)],
+                points[np.argmin(differences)],
+                points[np.argmax(sums)],
+                points[np.argmax(differences)],
+            ],
+            dtype=np.float32,
+        )
+
+    def _template_classify(self, image, box):
+        """Rectify the bright printed face and compare it with known labels."""
         x1, y1, x2, y2 = [float(value) for value in box]
         width = x2 - x1
         height = y2 - y1
-        x1 = max(0, int(round(x1 - 0.10 * width)))
-        y1 = max(0, int(round(y1 - 0.08 * height)))
-        x2 = min(image.shape[1], int(round(x2 + 0.10 * width)))
-        y2 = min(image.shape[0], int(round(y2 + 0.08 * height)))
+        x1 = max(0, int(round(x1 - 0.20 * width)))
+        y1 = max(0, int(round(y1 - 0.20 * height)))
+        x2 = min(image.shape[1], int(round(x2 + 0.20 * width)))
+        y2 = min(image.shape[0], int(round(y2 + 0.20 * height)))
         crop = image[y1:y2, x1:x2]
         if crop.size == 0:
-            return None
+            return None, 0.0, 0.0
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, (64, 64), interpolation=cv2.INTER_AREA)
-        gray = cv2.equalizeHist(gray)
-        feature = self.vision_hog.compute(gray).reshape(1, -1).astype(np.float32)
-        class_id = int(self.vision_label_guard.predict(feature)[1][0, 0])
-        if class_id < 0 or class_id >= len(self.vision_class_names):
-            return None
-        return class_id
+        mask = cv2.threshold(
+            cv2.GaussianBlur(gray, (3, 3), 0),
+            205,
+            255,
+            cv2.THRESH_BINARY,
+        )[1]
+        contours = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )[0]
+        candidates = []
+        minimum_area = 0.04 * crop.shape[0] * crop.shape[1]
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < minimum_area:
+                continue
+            polygon = cv2.approxPolyDP(
+                contour, 0.035 * cv2.arcLength(contour, True), True
+            )
+            if len(polygon) == 4:
+                candidates.append((area, polygon))
+        if not candidates:
+            return None, 0.0, 0.0
+
+        _, polygon = max(candidates, key=lambda item: item[0])
+        destination = np.asarray(
+            [[0, 0], [127, 0], [127, 127], [0, 127]],
+            dtype=np.float32,
+        )
+        rectified = cv2.warpPerspective(
+            gray,
+            cv2.getPerspectiveTransform(
+                self._ordered_quad(polygon), destination
+            ),
+            (128, 128),
+        )
+        binary = cv2.threshold(
+            rectified,
+            0,
+            255,
+            cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU,
+        )[1]
+        scores = [
+            float(
+                np.corrcoef(
+                    binary.reshape(-1), template.reshape(-1)
+                )[0, 1]
+            )
+            for template in self.vision_label_templates
+        ]
+        class_id = int(np.argmax(scores))
+        ranked = sorted(scores, reverse=True)
+        score = ranked[0]
+        margin = ranked[0] - ranked[1]
+        if (
+            not math.isfinite(score)
+            or score < self.vision_template_min_score
+            or margin < self.vision_template_min_margin
+        ):
+            return None, score, margin
+        return class_id, score, margin
 
     def _detect(self, image, region):
         blob, scale, pad_x, pad_y = self._letterbox(image)
@@ -478,9 +575,19 @@ class PickDeliverTask:
         ) if candidates else []
         for index in np.asarray(indices).reshape(-1):
             item = candidates[int(index)]
-            class_id = self._guard_classify(image, item["box_px"])
+            class_id, template_score, template_margin = self._template_classify(
+                image, item["box_px"]
+            )
+            item["template_class_id"] = class_id
+            item["template_score"] = template_score
+            item["template_margin"] = template_margin
+            item["template_class_name"] = (
+                self.vision_class_names[class_id]
+                if class_id is not None
+                else "uncertain"
+            )
             if class_id is None:
-                continue
+                class_id = item["yolo_class_id"]
             item["class_id"] = class_id
             item["class_name"] = self.vision_class_names[class_id]
             x1, y1, x2, y2 = item["box_px"]
@@ -526,9 +633,10 @@ class PickDeliverTask:
             cv2.rectangle(annotated, (x1, y1), (x2, y2), colour, 2)
             cv2.putText(
                 annotated,
-                "%s (yolo:%s %.2f)"
+                "%s (template:%.2f yolo:%s %.2f)"
                 % (
-                    detection["class_name"],
+                    detection["template_class_name"],
+                    detection["template_score"],
                     detection["yolo_class_name"],
                     detection["confidence"],
                 ),
@@ -790,7 +898,10 @@ class PickDeliverTask:
                         + (item["center_y"] - target_y) ** 2
                     ),
                 )
-                if not self._inside_grasp_range(cube, region):
+                if (
+                    not self._inside_grasp_range(cube, region)
+                    or cube["template_class_id"] is None
+                ):
                     votes = []
                     rate.sleep()
                     continue
@@ -811,7 +922,8 @@ class PickDeliverTask:
         counts = {}
         raw_counts = {}
         for vote in votes:
-            counts[vote["class_id"]] = counts.get(vote["class_id"], 0) + 1
+            template_id = vote["template_class_id"]
+            counts[template_id] = counts.get(template_id, 0) + 1
             raw_id = vote["yolo_class_id"]
             raw_counts[raw_id] = raw_counts.get(raw_id, 0) + 1
         voted_class_id, support = max(
@@ -826,21 +938,24 @@ class PickDeliverTask:
         voted_cube = max(
             (
                 vote for vote in votes
-                if vote["class_id"] == voted_class_id
+                if vote["template_class_id"] == voted_class_id
             ),
-            key=lambda vote: vote["confidence"],
+            key=lambda vote: vote["template_score"],
         )
         raw_class_id, raw_support = max(
             raw_counts.items(), key=lambda item: item[1]
         )
         self._status(
             "Grasp-view camera classified %s region as %s "
-            "(guard vote=%d/%d, YOLO raw=%s %d/%d)"
+            "(template vote=%d/%d score=%.3f margin=%.3f; "
+            "YOLO raw=%s %d/%d)"
             % (
                 region["display_name"],
-                voted_cube["class_name"],
+                voted_cube["template_class_name"],
                 support,
                 len(votes),
+                voted_cube["template_score"],
+                voted_cube["template_margin"],
                 self.vision_class_names[raw_class_id],
                 raw_support,
                 len(votes),

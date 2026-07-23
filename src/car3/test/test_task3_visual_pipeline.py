@@ -36,6 +36,7 @@ class Task3VisualPipelineTest(unittest.TestCase):
         )
         self.assertNotIn("_classify_cube_multiview", source)
         self.assertNotIn("_collect_classification_view", source)
+        self.assertNotIn("vision_label_guard", source)
 
     def test_search_order_and_grasp_calibration_are_complete(self):
         config = yaml.safe_load(VISION_CONFIG.read_text(encoding="utf-8"))
@@ -84,12 +85,24 @@ class Task3VisualPipelineTest(unittest.TestCase):
         )
         detector.vision_input_name = detector.vision_session.get_inputs()[0].name
         detector.vision_output_name = detector.vision_session.get_outputs()[0].name
-        detector.vision_hog = cv2.HOGDescriptor(
-            (64, 64), (16, 16), (8, 8), (8, 8), 9
-        )
-        detector.vision_label_guard = cv2.ml.SVM_load(
-            str(VISION_DIR / "cube_label_hog_svm.xml")
-        )
+        detector.vision_template_min_score = config["vision_template_min_score"]
+        detector.vision_template_min_margin = config["vision_template_min_margin"]
+        detector.vision_label_templates = []
+        template_dir = PACKAGE_DIR / "models" / "cube" / "meshes"
+        for filename in (
+            "Food.png", "Daily_Necessities.png", "Electronics.png"
+        ):
+            template = cv2.imread(
+                str(template_dir / filename), cv2.IMREAD_GRAYSCALE
+            )
+            detector.vision_label_templates.append(
+                cv2.threshold(
+                    template,
+                    0,
+                    255,
+                    cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU,
+                )[1]
+            )
         detector._publish_vision_debug = lambda *_args: None
 
         checked = set()
