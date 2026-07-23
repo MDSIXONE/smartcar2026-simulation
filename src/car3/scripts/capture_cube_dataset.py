@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Capture labelled RGB images of all randomised task cubes for YOLO training.
+"""Capture a three-class YOLOv5 dataset with the task arm kept stationary.
 
-Run this only after ``task3_prepare.launch``.  The node drives to each live
-cube using the same calibrated pickup projection as the task, puts the arm in
-the grasp pose, saves RGB frames, and writes one YOLO label file per image.
+This is a simulation data-generation tool, not the final perception pipeline.
+Gazebo model poses are deliberately retained here for class ground truth and
+for reaching each calibrated pickup bay.  Once the vehicle arrives, the arm
+remains in the prepared initial posture while small base distance/yaw changes
+place the target cube in a physical 3x3 set of camera locations.
 """
 
 import json
 import math
 import os
+import sys
 import threading
 import time
 
@@ -19,19 +22,21 @@ from cv_bridge import CvBridge, CvBridgeError
 from gazebo_msgs.msg import ModelState
 from gazebo_msgs.srv import GetModelState
 from geometry_msgs.msg import Point, Pose, Quaternion, Twist
-from sensor_msgs.msg import CameraInfo, Image
+from sensor_msgs.msg import CameraInfo, Image, JointState
+from std_msgs.msg import Bool
 
-# Reuse the task's calibrated navigation, fine alignment, controller, and arm
-# helpers so data collection views the same scene geometry as a real pickup.
 import rospkg
-import sys
 
+
+# Reuse the task's calibrated navigation and fine-alignment helpers so dataset
+# collection observes the exact pose used immediately before a real pickup.
 SCRIPTS_DIR = os.path.join(rospkg.RosPack().get_path("car3"), "scripts")
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 
 from task3_pick_deliver import (  # noqa: E402
     ALL_CUBES,
+    ARM_JOINTS,
     LEFT_REFERENCE_YAW,
     LEFT_TARGET_MINUS_CAR,
     PickDeliverTask,
@@ -42,65 +47,176 @@ from task3_pick_deliver import (  # noqa: E402
 
 CLASS_BY_MODEL = {"cube_0": 0, "cube_1": 1, "cube_2": 2}
 CLASS_NAMES = ("food", "daily", "electronics")
-CUBE_HALF_SIZE_M = 0.02
+
+# Capture the real arrival view first.  The remaining entries are ordered
+# row-major so each class can also produce an immediately readable preview.
+GRID_CELLS = (
+    ("middle_center", 1, 1),
+    ("top_left", 0, 0),
+    ("top_center", 0, 1),
+    ("top_right", 0, 2),
+    ("middle_left", 1, 0),
+    ("middle_right", 1, 2),
+    ("bottom_left", 2, 0),
+    ("bottom_center", 2, 1),
+    ("bottom_right", 2, 2),
+)
+
+
+def _float_list_param(name, default, expected_length):
+    values = rospy.get_param(name, default)
+    if isinstance(values, str):
+        values = [value.strip() for value in values.split(",") if value.strip()]
+    if not isinstance(values, (list, tuple)) or len(values) != expected_length:
+        raise rospy.ROSException(
+            "%s must contain %d numeric values" % (name, expected_length)
+        )
+    return [float(value) for value in values]
+
+
+def _string_list_param(name, default):
+    values = rospy.get_param(name, default)
+    if isinstance(values, str):
+        values = [value.strip() for value in values.split(",") if value.strip()]
+    if not isinstance(values, (list, tuple)):
+        raise rospy.ROSException("%s must be a list or comma-separated string" % name)
+    return set(str(value) for value in values)
 
 
 class CubeDatasetCapture:
     def __init__(self):
-        # PickDeliverTask calls rospy.init_node and supplies the calibrated
-        # navigation/arm primitives.  The launch file sets cargo_category so
-        # its category resolver has a valid default.
+        # PickDeliverTask calls rospy.init_node and supplies calibrated movement
+        # helpers.  cargo_category only satisfies its constructor; all three
+        # models are captured below.
         self.task = PickDeliverTask()
-        self.dataset_dir = os.path.expanduser(
+        self.dataset_dir = os.path.abspath(os.path.expanduser(
             rospy.get_param("~dataset_dir", "~/smartcar-yolo-dataset")
+        ))
+        self.frames_per_cell = max(
+            1, int(rospy.get_param("~frames_per_cell", 1))
         )
-        self.frames_per_cube = max(1, int(rospy.get_param("~frames_per_cube", 3)))
-        self.frame_interval = max(0.05, float(rospy.get_param("~frame_interval", 0.25)))
-        self.settle_seconds = max(0.0, float(rospy.get_param("~settle_seconds", 0.8)))
-        self.camera_timeout = max(0.5, float(rospy.get_param("~camera_timeout", 5.0)))
-        self.max_camera_adjustment = max(
-            0.05, float(rospy.get_param("~max_camera_adjustment", 0.80))
+        self.frame_interval = max(
+            0.05, float(rospy.get_param("~frame_interval", 0.20))
         )
-        self.direct_positioning = bool(rospy.get_param("~direct_positioning", True))
-        # The contact grasp pose puts the camera almost inside a 4 cm cube.
-        # This calibrated pre-grasp observation pose keeps the cube fully in view.
-        self.arm_capture = self.task._pose_param(
-            "~arm_capture_pose", [-0.0001, 1.1000, 0.7000, 1.2000, 0.0]
+        self.settle_seconds = max(
+            0.10, float(rospy.get_param("~settle_seconds", 0.60))
         )
-        self.arm_capture_duration = max(
-            0.2, float(rospy.get_param("~arm_capture_duration", 1.5))
+        self.camera_timeout = max(
+            0.50, float(rospy.get_param("~camera_timeout", 5.0))
         )
-        self.model_frame = rospy.get_param("~model_frame", "odom")
-        self.park_pose = self.task._pose_param(
-            "~arm_park_pose", [-0.0001, -0.4999, 1.2800, 1.7000, 0.0000]
+        self.arm_ready_timeout = max(
+            1.0, float(rospy.get_param("~arm_ready_timeout", 15.0))
+        )
+        self.arm_stationary_tolerance = max(
+            0.001, float(rospy.get_param("~arm_stationary_tolerance", 0.03))
+        )
+        self.direct_positioning = bool(
+            rospy.get_param("~direct_positioning", False)
+        )
+
+        # Moving backward from the calibrated pickup pose raises the object in
+        # this arm-mounted camera.  Small yaw offsets move it left/right.  The
+        # values were measured with the arm in task3_prepare's initial posture.
+        self.grid_distance_offsets = _float_list_param(
+            "~grid_distance_offsets", [0.25, 0.10, 0.0], 3
+        )
+        self.grid_yaw_offsets = _float_list_param(
+            "~grid_yaw_offsets", [-0.30, 0.0, 0.30], 3
+        )
+        self.validation_cells = _string_list_param(
+            "~validation_cells", ["top_right", "bottom_left"]
+        )
+        unknown_validation_cells = self.validation_cells.difference(
+            cell_name for cell_name, _, _ in GRID_CELLS
+        )
+        if unknown_validation_cells:
+            raise rospy.ROSException(
+                "unknown validation grid cells: %s"
+                % sorted(unknown_validation_cells)
+            )
+
+        self.bbox_expand_x = max(
+            0.0, float(rospy.get_param("~bbox_expand_x", 0.08))
+        )
+        self.bbox_expand_top = max(
+            0.0, float(rospy.get_param("~bbox_expand_top", 0.05))
+        )
+        self.bbox_expand_bottom = max(
+            0.0, float(rospy.get_param("~bbox_expand_bottom", 0.40))
         )
 
         self.bridge = CvBridge()
-        self.get_model = rospy.ServiceProxy("/gazebo/get_model_state", GetModelState)
+        self.get_model = rospy.ServiceProxy(
+            "/gazebo/get_model_state", GetModelState
+        )
         self.image_lock = threading.Lock()
         self.latest_image = None
-        self.latest_image_stamp = rospy.Time(0)
+        self.latest_image_sequence = 0
         self.camera_info = None
-        self.image_sequence = 0
         self.run_id = time.strftime("%Y%m%d_%H%M%S")
+        self.initial_arm_positions = None
+        self.saved_records = []
 
-        camera_topic = rospy.get_param("~camera_topic", "/camera/rgb/image_raw")
-        camera_info_topic = rospy.get_param("~camera_info_topic", "/camera/rgb/camera_info")
-        rospy.Subscriber(camera_topic, Image, self._image_callback, queue_size=1)
-        rospy.Subscriber(camera_info_topic, CameraInfo, self._camera_info_callback, queue_size=1)
+        camera_topic = rospy.get_param(
+            "~camera_topic", "/camera/rgb/image_raw"
+        )
+        camera_info_topic = rospy.get_param(
+            "~camera_info_topic", "/camera/rgb/camera_info"
+        )
+        rospy.Subscriber(
+            camera_topic, Image, self._image_callback, queue_size=1
+        )
+        rospy.Subscriber(
+            camera_info_topic,
+            CameraInfo,
+            self._camera_info_callback,
+            queue_size=1,
+        )
 
-        self.images_dir = os.path.join(self.dataset_dir, "images")
-        self.labels_dir = os.path.join(self.dataset_dir, "labels")
-        os.makedirs(self.images_dir, exist_ok=True)
-        os.makedirs(self.labels_dir, exist_ok=True)
-        with open(os.path.join(self.dataset_dir, "classes.txt"), "w", encoding="utf-8") as handle:
-            handle.write("\n".join(CLASS_NAMES) + "\n")
+        self.image_dirs = {
+            split: os.path.join(self.dataset_dir, "images", split)
+            for split in ("train", "val")
+        }
+        self.label_dirs = {
+            split: os.path.join(self.dataset_dir, "labels", split)
+            for split in ("train", "val")
+        }
+        self.previews_dir = os.path.join(self.dataset_dir, "previews")
+        for directory in (
+            list(self.image_dirs.values())
+            + list(self.label_dirs.values())
+            + [self.previews_dir]
+        ):
+            os.makedirs(directory, exist_ok=True)
+
         self.metadata_path = os.path.join(self.dataset_dir, "metadata.jsonl")
+        self._write_dataset_files()
+
+    def _write_dataset_files(self):
+        with open(
+            os.path.join(self.dataset_dir, "classes.txt"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            handle.write("\n".join(CLASS_NAMES) + "\n")
+
+        with open(
+            os.path.join(self.dataset_dir, "dataset.yaml"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            handle.write("path: .\n")
+            handle.write("train: images/train\n")
+            handle.write("val: images/val\n")
+            handle.write("nc: %d\n" % len(CLASS_NAMES))
+            handle.write("names:\n")
+            for class_id, class_name in enumerate(CLASS_NAMES):
+                handle.write("  %d: %s\n" % (class_id, class_name))
 
     def _image_callback(self, message):
         with self.image_lock:
             self.latest_image = message
-            self.latest_image_stamp = message.header.stamp
+            self.latest_image_sequence += 1
 
     def _camera_info_callback(self, message):
         self.camera_info = message
@@ -115,47 +231,137 @@ class CubeDatasetCapture:
             rospy.sleep(0.05)
         raise rospy.ROSException("camera image or camera_info did not arrive")
 
+    def _wait_for_fresh_image(self, after_sequence):
+        deadline = time.monotonic() + self.camera_timeout
+        while not rospy.is_shutdown() and time.monotonic() < deadline:
+            with self.image_lock:
+                if (
+                    self.latest_image is not None
+                    and self.latest_image_sequence > after_sequence
+                ):
+                    return self.latest_image, self.latest_image_sequence
+            rospy.sleep(0.02)
+        raise rospy.ROSException("a fresh RGB camera frame did not arrive")
+
+    @staticmethod
+    def _arm_positions_from_message(message):
+        positions = {}
+        for joint_name in ARM_JOINTS:
+            if joint_name not in message.name:
+                raise rospy.ROSException(
+                    "joint_states is missing %s" % joint_name
+                )
+            positions[joint_name] = message.position[
+                message.name.index(joint_name)
+            ]
+        return positions
+
+    def _wait_for_stationary_arm(self):
+        ready = rospy.wait_for_message(
+            "/sim_task3/arm_initial_pose_ready",
+            Bool,
+            timeout=self.arm_ready_timeout,
+        )
+        if not ready.data:
+            raise rospy.ROSException("prepared initial arm pose is not ready")
+        joint_state = rospy.wait_for_message(
+            "/joint_states", JointState, timeout=self.arm_ready_timeout
+        )
+        self.initial_arm_positions = self._arm_positions_from_message(
+            joint_state
+        )
+        self.task._status(
+            "Dataset capture locked the stationary arm baseline: %s"
+            % [
+                round(self.initial_arm_positions[joint], 4)
+                for joint in ARM_JOINTS
+            ]
+        )
+
+    def _assert_arm_stationary(self):
+        message = rospy.wait_for_message(
+            "/joint_states", JointState, timeout=self.arm_ready_timeout
+        )
+        current = self._arm_positions_from_message(message)
+        largest_drift = max(
+            abs(current[joint] - self.initial_arm_positions[joint])
+            for joint in ARM_JOINTS
+        )
+        if largest_drift > self.arm_stationary_tolerance:
+            raise rospy.ROSException(
+                "arm moved during dataset capture: max drift %.4f rad exceeds %.4f"
+                % (largest_drift, self.arm_stationary_tolerance)
+            )
+        return current
+
     def _cube_poses(self):
         poses = {}
         for model in ALL_CUBES:
             response = self.get_model(model, "world")
             if not response.success:
-                raise rospy.ROSException("target model %s has not spawned" % model)
+                raise rospy.ROSException(
+                    "target model %s has not spawned" % model
+                )
             poses[model] = response.pose
         return poses
 
-    def _position_base(self, goal, description):
-        if not self.direct_positioning:
-            if not self.task._move_base(goal, description):
-                return False
-            return self.task._fine_align_base(goal)
-
-        quaternion = transformations.quaternion_from_euler(0.0, 0.0, goal[2])
+    def _set_base_pose(self, goal, description):
+        quaternion = transformations.quaternion_from_euler(
+            0.0, 0.0, goal[2]
+        )
         state = ModelState()
         state.model_name = "car3"
         state.pose = Pose(
             position=Point(x=goal[0], y=goal[1], z=0.01),
             orientation=Quaternion(
-                x=quaternion[0], y=quaternion[1], z=quaternion[2], w=quaternion[3]
+                x=quaternion[0],
+                y=quaternion[1],
+                z=quaternion[2],
+                w=quaternion[3],
             ),
         )
         state.twist = Twist()
         state.reference_frame = "world"
         response = self.task.set_model(state)
         if not response.success:
-            rospy.logerr("Could not position vehicle for %s: %s", description, response.status_message)
+            rospy.logerr(
+                "Could not position vehicle for %s: %s",
+                description,
+                response.status_message,
+            )
             return False
-        rospy.sleep(0.5)
+        rospy.sleep(self.settle_seconds)
         return True
+
+    def _reach_pickup_pose(self, goal, description):
+        if self.direct_positioning:
+            return self._set_base_pose(goal, description)
+        if not self.task._move_base(goal, description):
+            return False
+        return self.task._fine_align_base(goal)
+
+    def _reach_grid_pose(self, goal, description):
+        if self.direct_positioning:
+            return self._set_base_pose(goal, description)
+        # These are small movements around an already reached pickup bay.
+        # Fine alignment drives the real planar base at low speed while the
+        # prepared arm-pose holder remains active.
+        return self.task._fine_align_base(goal)
 
     @staticmethod
     def _pickup_goal(model, poses):
-        ordered = sorted(ALL_CUBES, key=lambda name: poses[name].position.x)
+        ordered = sorted(
+            ALL_CUBES, key=lambda name: poses[name].position.x
+        )
         region_index = ordered.index(model)
         region_name = ("left", "upper", "right")[region_index]
-        pickup_yaw = wrap(LEFT_REFERENCE_YAW - region_index * math.pi / 2.0)
+        pickup_yaw = wrap(
+            LEFT_REFERENCE_YAW - region_index * math.pi / 2.0
+        )
         local_dx, local_dy = rotate_2d(
-            LEFT_TARGET_MINUS_CAR[0], LEFT_TARGET_MINUS_CAR[1], -LEFT_REFERENCE_YAW
+            LEFT_TARGET_MINUS_CAR[0],
+            LEFT_TARGET_MINUS_CAR[1],
+            -LEFT_REFERENCE_YAW,
         )
         target_minus_car_x, target_minus_car_y = rotate_2d(
             local_dx, local_dy, pickup_yaw
@@ -167,169 +373,81 @@ class CubeDatasetCapture:
             pickup_yaw,
         ), region_name
 
-    @staticmethod
-    def _corners(pose):
-        matrix = transformations.quaternion_matrix(
-            [pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w]
+    def _grid_goal(self, pickup_goal, row, column):
+        # Positive distance offset moves backward from the cube, which raises
+        # it in the image while keeping the arm and camera joints unchanged.
+        backward_x, backward_y = rotate_2d(
+            -self.grid_distance_offsets[row], 0.0, pickup_goal[2]
         )
-        for x in (-CUBE_HALF_SIZE_M, CUBE_HALF_SIZE_M):
-            for y in (-CUBE_HALF_SIZE_M, CUBE_HALF_SIZE_M):
-                for z in (-CUBE_HALF_SIZE_M, CUBE_HALF_SIZE_M):
-                    point = matrix.dot([x, y, z, 1.0])
-                    yield Point(
-                        x=point[0] + pose.position.x,
-                        y=point[1] + pose.position.y,
-                        z=point[2] + pose.position.z,
-                    )
-
-    def _project_box(self, pose):
-        if self.camera_info is None:
-            return None
-        camera_pose = self._camera_world_pose()
-        if camera_pose is None:
-            return None
-
-        fx, fy = self.camera_info.K[0], self.camera_info.K[4]
-        cx, cy = self.camera_info.K[2], self.camera_info.K[5]
-        image_width, image_height = self.camera_info.width, self.camera_info.height
-        pixels = []
-        for point in self._corners(pose):
-            point_camera = self._world_to_camera(point, camera_pose)
-            if point_camera.z <= 0.02:
-                continue
-            pixels.append((
-                fx * point_camera.x / point_camera.z + cx,
-                fy * point_camera.y / point_camera.z + cy,
-            ))
-        if len(pixels) < 4:
-            return None
-
-        left = max(0.0, min(pixel[0] for pixel in pixels))
-        right = min(float(image_width - 1), max(pixel[0] for pixel in pixels))
-        top = max(0.0, min(pixel[1] for pixel in pixels))
-        bottom = min(float(image_height - 1), max(pixel[1] for pixel in pixels))
-        if right - left < 2.0 or bottom - top < 2.0:
-            return None
-        return left, top, right, bottom
-
-    def _camera_world_pose(self):
-        response = self.task.get_link("car3::camera_depth_optical_frame", "world")
-        if not response.success:
-            rospy.logwarn("could not read Gazebo camera optical frame: %s", response.status_message)
-            return None
-        return response.link_state.pose
+        return (
+            pickup_goal[0] + backward_x,
+            pickup_goal[1] + backward_y,
+            wrap(pickup_goal[2] + self.grid_yaw_offsets[column]),
+        )
 
     @staticmethod
-    def _world_to_camera(point, camera_pose):
-        rotation_world_from_camera = transformations.quaternion_matrix([
-            camera_pose.orientation.x, camera_pose.orientation.y,
-            camera_pose.orientation.z, camera_pose.orientation.w,
-        ])[:3, :3]
-        relative_world = [
-            point.x - camera_pose.position.x,
-            point.y - camera_pose.position.y,
-            point.z - camera_pose.position.z,
-        ]
-        point_camera = rotation_world_from_camera.T.dot(relative_world)
-        return Point(x=point_camera[0], y=point_camera[1], z=point_camera[2])
-
-    def _target_camera_point(self, pose):
-        camera_pose = self._camera_world_pose()
-        if camera_pose is None:
-            return None
-        point_camera = self._world_to_camera(pose.position, camera_pose)
-        rotation_world_from_camera = transformations.quaternion_matrix([
-            camera_pose.orientation.x, camera_pose.orientation.y,
-            camera_pose.orientation.z, camera_pose.orientation.w,
-        ])[:3, :3]
-        return point_camera, rotation_world_from_camera.T
-
-    def _centre_camera_view(self, pose):
-        """Translate the base slowly so the grasp-pose camera sees the cube.
-
-        The camera observes from a pre-grasp pose above the object.  This
-        additional XY-only correction keeps the calibrated heading and makes
-        the target centre the RGB image without changing camera height.
-        """
-        for _ in range(2):
-            transformed = self._target_camera_point(pose)
-            if transformed is None:
-                return False
-            point_camera, rotation_camera_from_world = transformed
-            if abs(point_camera.x) <= 0.015 and abs(point_camera.y) <= 0.015:
-                return True
-
-            # p_camera(new) = p_camera(now) - R_camera_from_world * delta_xy.
-            a, b = rotation_camera_from_world[0, 0], rotation_camera_from_world[0, 1]
-            c, d = rotation_camera_from_world[1, 0], rotation_camera_from_world[1, 1]
-            determinant = a * d - b * c
-            if abs(determinant) < 1e-6:
-                rospy.logwarn("Camera XY adjustment is singular; cannot centre capture target")
-                return False
-            rhs_x = point_camera.x
-            rhs_y = point_camera.y
-            delta_x = (rhs_x * d - b * rhs_y) / determinant
-            delta_y = (a * rhs_y - rhs_x * c) / determinant
-            adjustment = math.hypot(delta_x, delta_y)
-            if adjustment > self.max_camera_adjustment:
-                rospy.logwarn(
-                    "Camera target adjustment %.3f m exceeds %.3f m; keeping calibrated pickup pose",
-                    adjustment, self.max_camera_adjustment,
-                )
-                return False
-
-            robot_pose = self.task._robot_pose()
-            robot_yaw = transformations.euler_from_quaternion([
-                robot_pose.orientation.x, robot_pose.orientation.y,
-                robot_pose.orientation.z, robot_pose.orientation.w,
-            ])[2]
-            goal = (
-                robot_pose.position.x + delta_x,
-                robot_pose.position.y + delta_y,
-                robot_yaw,
-            )
-            self.task._status(
-                "Camera framing adjustment: dx=%.3f m dy=%.3f m target=(%.3f, %.3f, %.3f)"
-                % (delta_x, delta_y, point_camera.x, point_camera.y, point_camera.z)
-            )
-            if not self._position_base(goal, "camera framing"):
-                return False
-        return self._project_box(pose) is not None
+    def _expected_cell_centre(row, column):
+        return (
+            (column + 0.5) / 3.0,
+            (row + 0.5) / 3.0,
+        )
 
     @staticmethod
-    def _detect_central_cube(image):
-        """Return the bright cube face closest to the calibrated image centre.
-
-        Gazebo's camera plugin renders in a frame rotated from the retained
-        URDF optical link, so its reported link pose cannot be used reliably
-        for pixel projection.  The target face is deliberately centred before
-        capture and has a bright label against the dark, uniform background.
-        """
+    def _detect_cube_near(image, expected_centre):
+        """Return the bright labelled cube face nearest a grid cell centre."""
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         _, mask = cv2.threshold(gray, 210, 255, cv2.THRESH_BINARY)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
         height, width = gray.shape
-        image_centre = (width * 0.5, height * 0.5)
+        expected_x = expected_centre[0] * width
+        expected_y = expected_centre[1] * height
         candidates = []
         for contour in contours:
             left, top, box_width, box_height = cv2.boundingRect(contour)
             area = box_width * box_height
-            if box_width < 12 or box_height < 12 or area < 500:
+            if box_width < 10 or box_height < 10 or area < 180:
                 continue
-            if box_width > width * 0.9 or box_height > height * 0.9:
+            if box_width > width * 0.80 or box_height > height * 0.80:
                 continue
-            centre = (left + box_width * 0.5, top + box_height * 0.5)
-            distance = math.hypot(centre[0] - image_centre[0], centre[1] - image_centre[1])
-            candidates.append((distance, left, top, left + box_width, top + box_height))
+            centre_x = left + box_width * 0.5
+            centre_y = top + box_height * 0.5
+            distance = math.hypot(
+                (centre_x - expected_x) / width,
+                (centre_y - expected_y) / height,
+            )
+            candidates.append((
+                distance,
+                float(left),
+                float(top),
+                float(left + box_width),
+                float(top + box_height),
+            ))
         if not candidates:
             return None
         _, left, top, right, bottom = min(candidates)
-        return float(left), float(top), float(right), float(bottom)
+        return left, top, right, bottom
 
-    def _labels(self, target_model, image):
-        box = self._detect_central_cube(image)
-        if box is None:
-            return [], []
+    def _expanded_box(self, box, image):
+        left, top, right, bottom = box
+        box_width = right - left
+        box_height = bottom - top
+        image_height, image_width = image.shape[:2]
+        return (
+            max(0.0, left - box_width * self.bbox_expand_x),
+            max(0.0, top - box_height * self.bbox_expand_top),
+            min(
+                float(image_width - 1),
+                right + box_width * self.bbox_expand_x,
+            ),
+            min(
+                float(image_height - 1),
+                bottom + box_height * self.bbox_expand_bottom,
+            ),
+        )
+
+    def _label_row(self, target_model, box, image):
         left, top, right, bottom = box
         width = float(image.shape[1])
         height = float(image.shape[0])
@@ -337,95 +455,268 @@ class CubeDatasetCapture:
         centre_y = (top + bottom) * 0.5 / height
         box_width = (right - left) / width
         box_height = (bottom - top) / height
-        row = "%d %.6f %.6f %.6f %.6f" % (
-            CLASS_BY_MODEL[target_model], centre_x, centre_y, box_width, box_height
+        return "%d %.6f %.6f %.6f %.6f" % (
+            CLASS_BY_MODEL[target_model],
+            centre_x,
+            centre_y,
+            box_width,
+            box_height,
         )
-        metadata = [{
-            "model": target_model,
-            "class_id": CLASS_BY_MODEL[target_model],
-            "bbox_px": box,
-            "source": "rgb_target_contour",
-        }]
-        return [row], metadata
 
-    def _capture_frame(self, target_model, target_region, poses, frame_index):
-        with self.image_lock:
-            message = self.latest_image
-        if message is None:
-            raise rospy.ROSException("no RGB frame is available")
+    def _capture_frame(
+        self,
+        target_model,
+        target_region,
+        grid_cell,
+        row,
+        column,
+        grid_goal,
+        frame_index,
+        after_sequence,
+    ):
+        message, sequence = self._wait_for_fresh_image(after_sequence)
         try:
-            image = self.bridge.imgmsg_to_cv2(message, desired_encoding="bgr8")
+            image = self.bridge.imgmsg_to_cv2(
+                message, desired_encoding="bgr8"
+            )
         except CvBridgeError as error:
-            raise rospy.ROSException("could not convert camera image: %s" % error)
+            raise rospy.ROSException(
+                "could not convert camera image: %s" % error
+            )
 
-        label_rows, label_metadata = self._labels(target_model, image)
-        if not label_rows:
-            raise rospy.ROSException("could not locate the centred target cube in the RGB frame")
-        filename = "%s_%s_%s_%02d" % (
-            self.run_id, target_region, target_model, frame_index
+        expected_centre = self._expected_cell_centre(row, column)
+        detected_box = self._detect_cube_near(image, expected_centre)
+        if detected_box is None:
+            raise rospy.ROSException(
+                "could not locate %s in grid cell %s"
+                % (target_model, grid_cell)
+            )
+        box = self._expanded_box(detected_box, image)
+        split = "val" if grid_cell in self.validation_cells else "train"
+        filename = "%s_%s_%s_%s_%02d" % (
+            self.run_id,
+            target_region,
+            target_model,
+            grid_cell,
+            frame_index,
         )
-        image_path = os.path.join(self.images_dir, filename + ".jpg")
-        label_path = os.path.join(self.labels_dir, filename + ".txt")
-        if not cv2.imwrite(image_path, image):
+        image_path = os.path.join(
+            self.image_dirs[split], filename + ".jpg"
+        )
+        label_path = os.path.join(
+            self.label_dirs[split], filename + ".txt"
+        )
+        if not cv2.imwrite(
+            image_path, image, [cv2.IMWRITE_JPEG_QUALITY, 95]
+        ):
             raise rospy.ROSException("could not write %s" % image_path)
+        label_row = self._label_row(target_model, box, image)
         with open(label_path, "w", encoding="utf-8") as handle:
-            handle.write("\n".join(label_rows))
-            if label_rows:
-                handle.write("\n")
+            handle.write(label_row + "\n")
 
+        arm_positions = self._assert_arm_stationary()
+        live_poses = self._cube_poses()
         record = {
+            "run_id": self.run_id,
             "image": os.path.relpath(image_path, self.dataset_dir),
             "label": os.path.relpath(label_path, self.dataset_dir),
+            "split": split,
             "target_model": target_model,
+            "class_id": CLASS_BY_MODEL[target_model],
+            "class_name": CLASS_NAMES[CLASS_BY_MODEL[target_model]],
             "target_region": target_region,
+            "grid_cell": grid_cell,
+            "grid_row": row,
+            "grid_column": column,
+            "expected_centre_normalized": expected_centre,
+            "bbox_px": box,
+            "bbox_source": "rgb_bright_label_contour",
             "sim_time": message.header.stamp.to_sec(),
-            "boxes": label_metadata,
+            "base_goal": {
+                "x": grid_goal[0],
+                "y": grid_goal[1],
+                "yaw": grid_goal[2],
+            },
+            "arm_positions": {
+                joint: arm_positions[joint] for joint in ARM_JOINTS
+            },
             "cube_world_poses": {
                 model: {
-                    "x": poses[model].position.x,
-                    "y": poses[model].position.y,
-                    "z": poses[model].position.z,
+                    "x": live_poses[model].position.x,
+                    "y": live_poses[model].position.y,
+                    "z": live_poses[model].position.z,
                 }
                 for model in ALL_CUBES
             },
         }
         with open(self.metadata_path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-        rospy.loginfo("Saved %s (%d YOLO boxes)", image_path, len(label_rows))
+        self.saved_records.append(record)
+        rospy.loginfo(
+            "Saved %s [%s, class=%s, cell=%s]",
+            image_path,
+            split,
+            record["class_name"],
+            grid_cell,
+        )
+        return sequence, image_path, box
+
+    def _write_grid_preview(self, target_model, target_region, samples):
+        preview_rows = []
+        for row in range(3):
+            preview_columns = []
+            for column in range(3):
+                sample = samples[(row, column)]
+                image = cv2.imread(sample["image_path"])
+                if image is None:
+                    raise rospy.ROSException(
+                        "could not read preview source %s"
+                        % sample["image_path"]
+                    )
+                left, top, right, bottom = sample["bbox"]
+                cv2.rectangle(
+                    image,
+                    (int(round(left)), int(round(top))),
+                    (int(round(right)), int(round(bottom))),
+                    (0, 255, 0),
+                    2,
+                )
+                cv2.putText(
+                    image,
+                    sample["grid_cell"],
+                    (12, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.65,
+                    (0, 255, 0),
+                    2,
+                    cv2.LINE_AA,
+                )
+                preview_columns.append(
+                    cv2.resize(image, (320, 240))
+                )
+            preview_rows.append(cv2.hconcat(preview_columns))
+        preview = cv2.vconcat(preview_rows)
+        preview_path = os.path.join(
+            self.previews_dir,
+            "%s_%s_%s_grid.jpg"
+            % (self.run_id, target_region, target_model),
+        )
+        if not cv2.imwrite(
+            preview_path, preview, [cv2.IMWRITE_JPEG_QUALITY, 92]
+        ):
+            raise rospy.ROSException(
+                "could not write preview %s" % preview_path
+            )
+        rospy.loginfo("Saved 3x3 preview %s", preview_path)
+
+    def _write_summary(self):
+        counts = {
+            split: {
+                class_name: sum(
+                    1
+                    for record in self.saved_records
+                    if record["split"] == split
+                    and record["class_name"] == class_name
+                )
+                for class_name in CLASS_NAMES
+            }
+            for split in ("train", "val")
+        }
+        summary = {
+            "run_id": self.run_id,
+            "dataset_dir": self.dataset_dir,
+            "classes": list(CLASS_NAMES),
+            "counts": counts,
+            "total_images": len(self.saved_records),
+            "arm_remained_stationary": True,
+            "grid_distance_offsets": self.grid_distance_offsets,
+            "grid_yaw_offsets": self.grid_yaw_offsets,
+        }
+        with open(
+            os.path.join(self.dataset_dir, "summary.json"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(summary, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
 
     def run(self):
         self.task._wait_for_services()
         self._wait_for_camera()
+        self._wait_for_stationary_arm()
         poses = self._cube_poses()
-        ordered = sorted(ALL_CUBES, key=lambda model: poses[model].position.x)
-        arm_started = False
+        ordered = sorted(
+            ALL_CUBES, key=lambda model: poses[model].position.x
+        )
 
         for model in ordered:
-            pickup_goal, region = self._pickup_goal(model, poses)
-            transport = "direct positioning" if self.direct_positioning else "navigation"
-            self.task._status("Dataset capture: %s to %s (%s)" % (transport, model, region))
-            if not self._position_base(pickup_goal, "%s dataset capture" % region):
-                raise rospy.ROSException("cannot precisely align at %s capture pose" % region)
-            if not arm_started:
-                self.task._start_arm_control()
-                arm_started = True
-            self.task._set_gripper(1.0)
-            self.task._move_arm(self.arm_capture, self.arm_capture_duration)
-            if not self._centre_camera_view(poses[model]):
-                raise rospy.ROSException("could not frame %s in the RGB camera" % model)
-            rospy.sleep(self.settle_seconds)
-
-            # Refresh live poses before projecting labels in case physics has moved a cube.
             poses = self._cube_poses()
-            for frame_index in range(self.frames_per_cube):
-                self._capture_frame(model, region, poses, frame_index)
-                rospy.sleep(self.frame_interval)
-            # Confirm the camera/gripper can still reach the real grasp pose
-            # before parking for travel to the next cube.
-            self.task._move_arm(self.task.arm_grasp, self.task.arm_grasp_duration)
-            self.task._move_arm(self.park_pose, self.task.arm_grasp_duration)
+            pickup_goal, region = self._pickup_goal(model, poses)
+            transport = (
+                "direct positioning"
+                if self.direct_positioning
+                else "navigation"
+            )
+            self.task._status(
+                "Dataset capture: %s to %s (%s), arm remains stationary"
+                % (transport, model, region)
+            )
+            if not self._reach_pickup_pose(
+                pickup_goal, "%s dataset capture" % region
+            ):
+                raise rospy.ROSException(
+                    "cannot reach %s capture pose" % region
+                )
+            self._assert_arm_stationary()
 
-        self.task._status("DATASET DONE: images and YOLO labels saved to %s" % self.dataset_dir)
+            preview_samples = {}
+            for grid_cell, row, column in GRID_CELLS:
+                grid_goal = self._grid_goal(
+                    pickup_goal, row, column
+                )
+                self.task._status(
+                    "Dataset %s/%s: moving stationary-arm camera view to %s"
+                    % (model, region, grid_cell)
+                )
+                if not self._reach_grid_pose(
+                    grid_goal, "%s %s" % (model, grid_cell)
+                ):
+                    raise rospy.ROSException(
+                        "cannot reach grid pose %s for %s"
+                        % (grid_cell, model)
+                    )
+                self._assert_arm_stationary()
+                rospy.sleep(self.settle_seconds)
+                with self.image_lock:
+                    sequence = self.latest_image_sequence
+                for frame_index in range(self.frames_per_cell):
+                    sequence, image_path, box = self._capture_frame(
+                        model,
+                        region,
+                        grid_cell,
+                        row,
+                        column,
+                        grid_goal,
+                        frame_index,
+                        sequence,
+                    )
+                    if frame_index == 0:
+                        preview_samples[(row, column)] = {
+                            "grid_cell": grid_cell,
+                            "image_path": image_path,
+                            "bbox": box,
+                        }
+                    rospy.sleep(self.frame_interval)
+            self._write_grid_preview(
+                model, region, preview_samples
+            )
+
+        self._write_summary()
+        self.task._status(
+            "DATASET DONE: %d images and YOLOv5 labels saved to %s; "
+            "arm remained stationary"
+            % (len(self.saved_records), self.dataset_dir)
+        )
 
 
 if __name__ == "__main__":

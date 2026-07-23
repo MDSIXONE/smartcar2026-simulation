@@ -1,20 +1,22 @@
 <launch>
   <arg name="dataset_dir" default="$(env HOME)/smartcar-yolo-dataset"/>
-  <arg name="frames_per_cube" default="3"/>
-  <arg name="direct_positioning" default="true"/>
+  <arg name="frames_per_cell" default="1"/>
+  <arg name="direct_positioning" default="false"/>
 
-  <!-- Run only after task3_prepare.launch.  This node visits all three live,
-       randomly spawned cubes, opens the gripper, adopts the calibrated grasp
-       pose, and saves RGB images plus YOLO labels. -->
+  <!-- Run only after task3_prepare.launch.  This node visits all three live
+       randomly spawned cubes and keeps the arm in its prepared initial pose.
+       Base distance/yaw changes put each cube in a physical 3x3 set of camera
+       positions, producing standard YOLOv5 train/val images and labels. -->
   <node name="capture_cube_dataset" pkg="car3" type="capture_cube_dataset.py"
         output="screen">
     <param name="cargo_category" value="food"/>
     <param name="dataset_dir" value="$(arg dataset_dir)"/>
-    <param name="frames_per_cube" value="$(arg frames_per_cube)"/>
+    <param name="frames_per_cell" value="$(arg frames_per_cell)"/>
     <param name="camera_topic" value="/camera/rgb/image_raw"/>
     <param name="camera_info_topic" value="/camera/rgb/camera_info"/>
-    <param name="model_frame" value="odom"/>
     <param name="direct_positioning" value="$(arg direct_positioning)"/>
-    <param name="arm_capture_pose" value="-0.0001,1.1000,0.7000,1.2000,0.0"/>
+    <rosparam param="grid_distance_offsets">[0.25, 0.10, 0.0]</rosparam>
+    <rosparam param="grid_yaw_offsets">[-0.30, 0.0, 0.30]</rosparam>
+    <rosparam param="validation_cells">['top_right', 'bottom_left']</rosparam>
   </node>
 </launch>

@@ -265,7 +265,69 @@ rostopic echo -n 1 /sim_task3/done
 data: True
 ```
 
-## 7. 手动标定工具
+## 7. 机械臂静止状态的 YOLOv5 数据采集
+
+当前任务执行节点仍使用 Gazebo 物块坐标完成类别模型与取货区域映射。该方式只作为
+视觉替换前的过渡版本；正式版本应由摄像头识别结果给出类别与像素位置。
+
+数据采集器同样读取 Gazebo 坐标，但用途仅限于：
+
+- 自动驶向三个随机物块对应的标定取货位；
+- 确定训练标签的真实类别；
+- 在 `metadata.jsonl` 中记录仿真真值，便于检查标注。
+
+车辆到达物块前方后，采集器不会启动机械臂控制器。它先拍摄机械臂尚未动作时的
+中央视图，再通过底盘前后距离和小角度转向，让物块分别进入画面九宫格的九个区域。
+每次拍摄都会检查 `arm_joint1..5`，任一关节相对初始值漂移超过 `0.03 rad` 就立即
+停止采集。
+
+先按第 1 节启动并完成 `task3_prepare.launch`，再在另一个终端执行：
+
+```bash
+roslaunch car3 capture_cube_dataset.launch \
+  dataset_dir:=./datasets/cube_yolov5 \
+  frames_per_cell:=1 \
+  direct_positioning:=false
+```
+
+`direct_positioning:=false` 会让车辆真实导航到三个物块，并在每个物块附近低速完成
+九宫格运动。若只需快速生成仿真样本，可临时使用 `direct_positioning:=true`。
+
+每次运行默认生成 27 张图片：食品、日用品、电子产品各 9 张。其中每类 7 张进入
+训练集，`top_right` 和 `bottom_left` 两张进入验证集。再次运行会使用新的时间戳
+文件名追加样本。输出结构可直接供 YOLOv5 使用：
+
+```text
+datasets/cube_yolov5/
+├─ dataset.yaml
+├─ classes.txt
+├─ summary.json
+├─ metadata.jsonl
+├─ images/
+│  ├─ train/
+│  └─ val/
+├─ labels/
+│  ├─ train/
+│  └─ val/
+└─ previews/
+   └─ 每个类别一张九宫格检查图
+```
+
+在 YOLOv5 仓库根目录中可使用：
+
+```bash
+python train.py \
+  --img 640 \
+  --batch 8 \
+  --epochs 100 \
+  --data ../smartcar2026-simulation/datasets/cube_yolov5/dataset.yaml \
+  --weights yolov5s.pt
+```
+
+训练前先打开 `previews/` 中的三张九宫格图，确认绿色框覆盖完整物块。当前自动框由
+摄像头亮色标签轮廓生成，Gazebo 坐标不参与像素框投影。
+
+## 8. 手动标定工具
 
 仅在自动任务没有运行时使用。
 
@@ -300,7 +362,7 @@ python3 "$(rospack find car3)/scripts/keyboard_drive.py" \
   _pose_save_path:=./car3_saved_pose.yaml
 ```
 
-## 7. 常见故障
+## 9. 常见故障
 
 ### 关节 3、4 初始后漂移或看起来断开
 
@@ -341,6 +403,6 @@ rostopic echo -n 1 /grasp_attach/state
 roslaunch car3 task3_execute.launch cargo_category:="食品" cargo_name:="自定义物品"
 ```
 
-## 8. 测试记录
+## 10. 测试记录
 
 在无界面 Gazebo 中已验证过完整流程：准备、动态区域判断、精确对位、真实 `grasp_attach` 夹取、携带姿态、食品加工车间导航和完成信号。一次基准运行从准备启动到完成为 65 秒。
