@@ -11,40 +11,28 @@ place the target cube in a physical 3x3 set of camera locations.
 import json
 import math
 import os
-import sys
 import threading
 import time
 
+import actionlib
 import cv2
 import rospy
 import tf.transformations as transformations
+from actionlib_msgs.msg import GoalStatus
 from cv_bridge import CvBridge, CvBridgeError
 from gazebo_msgs.msg import ModelState
-from gazebo_msgs.srv import GetModelState
+from gazebo_msgs.srv import GetModelState, SetModelState
 from geometry_msgs.msg import Point, Pose, Quaternion, Twist
+from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
 from sensor_msgs.msg import CameraInfo, Image, JointState
-from std_msgs.msg import Bool
-
-import rospkg
-
-
-# Reuse the task's calibrated navigation and fine-alignment helpers so dataset
-# collection observes the exact pose used immediately before a real pickup.
-SCRIPTS_DIR = os.path.join(rospkg.RosPack().get_path("car3"), "scripts")
-if SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, SCRIPTS_DIR)
-
-from task3_pick_deliver import (  # noqa: E402
-    ALL_CUBES,
-    ARM_JOINTS,
-    LEFT_REFERENCE_YAW,
-    LEFT_TARGET_MINUS_CAR,
-    PickDeliverTask,
-    rotate_2d,
-    wrap,
-)
+from std_msgs.msg import Bool, String
+from std_srvs.srv import Empty
 
 
+ARM_JOINTS = ["arm_joint1", "arm_joint2", "arm_joint3", "arm_joint4", "arm_joint5"]
+ALL_CUBES = ("cube_0", "cube_1", "cube_2")
+LEFT_REFERENCE_YAW = 3.141157
+LEFT_TARGET_MINUS_CAR = (-0.319277, 0.000771)
 CLASS_BY_MODEL = {"cube_0": 0, "cube_1": 1, "cube_2": 2}
 CLASS_NAMES = ("food", "daily", "electronics")
 
@@ -61,6 +49,129 @@ GRID_CELLS = (
     ("bottom_center", 2, 1),
     ("bottom_right", 2, 2),
 )
+
+
+def clamp(value, lower, upper):
+    return max(lower, min(value, upper))
+
+
+def wrap(angle):
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
+def rotate_2d(x, y, yaw):
+    cosine = math.cos(yaw)
+    sine = math.sin(yaw)
+    return cosine * x - sine * y, sine * x + cosine * y
+
+
+class DatasetMotion:
+    """Gazebo-aware motion helpers used only by the offline data generator."""
+
+    def __init__(self):
+        rospy.init_node("capture_cube_dataset")
+        self.nav_timeout = float(rospy.get_param("~nav_timeout", 110.0))
+        self.fine_align_timeout = float(
+            rospy.get_param("~fine_align_timeout", 12.0)
+        )
+        self.fine_align_position_tolerance = float(
+            rospy.get_param("~fine_align_position_tolerance", 0.008)
+        )
+        self.fine_align_yaw_tolerance = float(
+            rospy.get_param("~fine_align_yaw_tolerance", 0.025)
+        )
+        self.cmd_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
+        self.status_pub = rospy.Publisher(
+            "/sim_task3/status", String, queue_size=10, latch=True
+        )
+        self.nav = actionlib.SimpleActionClient("move_base", MoveBaseAction)
+        self.get_model = rospy.ServiceProxy(
+            "/gazebo/get_model_state", GetModelState
+        )
+        self.set_model = rospy.ServiceProxy(
+            "/gazebo/set_model_state", SetModelState
+        )
+        self.clear_costmaps = rospy.ServiceProxy(
+            "/move_base/clear_costmaps", Empty
+        )
+
+    def _status(self, text):
+        rospy.loginfo(text)
+        self.status_pub.publish(String(data=text))
+
+    def _wait_for_services(self):
+        for name in ("/gazebo/get_model_state", "/gazebo/set_model_state"):
+            self._status("Waiting for %s" % name)
+            rospy.wait_for_service(name)
+        self._status("Waiting for move_base")
+        self.nav.wait_for_server()
+
+    def _move_base(self, goal, description):
+        message = MoveBaseGoal()
+        message.target_pose.header.frame_id = "map"
+        message.target_pose.header.stamp = rospy.Time.now()
+        message.target_pose.pose.position.x = goal[0]
+        message.target_pose.pose.position.y = goal[1]
+        quaternion = transformations.quaternion_from_euler(
+            0.0, 0.0, goal[2]
+        )
+        message.target_pose.pose.orientation = Quaternion(
+            x=quaternion[0],
+            y=quaternion[1],
+            z=quaternion[2],
+            w=quaternion[3],
+        )
+        self._status(
+            "Navigating to %s: (%.4f, %.4f, %.4f)"
+            % (description, goal[0], goal[1], goal[2])
+        )
+        for attempt in range(1, 4):
+            self.nav.send_goal(message)
+            if self.nav.wait_for_result(rospy.Duration(self.nav_timeout)):
+                if self.nav.get_state() == GoalStatus.SUCCEEDED:
+                    return True
+            self.nav.cancel_all_goals()
+            try:
+                self.clear_costmaps()
+            except rospy.ServiceException:
+                pass
+            rospy.sleep(1.0)
+        return False
+
+    def _fine_align_base(self, goal):
+        deadline = time.time() + self.fine_align_timeout
+        rate = rospy.Rate(20)
+        try:
+            while not rospy.is_shutdown() and time.time() < deadline:
+                response = self.get_model("car3", "world")
+                if not response.success:
+                    raise rospy.ROSException("could not read car3 pose")
+                pose = response.pose
+                yaw = transformations.euler_from_quaternion([
+                    pose.orientation.x,
+                    pose.orientation.y,
+                    pose.orientation.z,
+                    pose.orientation.w,
+                ])[2]
+                dx = goal[0] - pose.position.x
+                dy = goal[1] - pose.position.y
+                distance = math.hypot(dx, dy)
+                yaw_error = wrap(goal[2] - yaw)
+                if (
+                    distance <= self.fine_align_position_tolerance
+                    and abs(yaw_error) <= self.fine_align_yaw_tolerance
+                ):
+                    return True
+                forward, lateral = rotate_2d(dx, dy, -yaw)
+                command = Twist()
+                command.linear.x = clamp(1.8 * forward, -0.12, 0.12)
+                command.linear.y = clamp(1.8 * lateral, -0.12, 0.12)
+                command.angular.z = clamp(2.2 * yaw_error, -0.60, 0.60)
+                self.cmd_pub.publish(command)
+                rate.sleep()
+        finally:
+            self.cmd_pub.publish(Twist())
+        return False
 
 
 def _float_list_param(name, default, expected_length):
@@ -85,10 +196,7 @@ def _string_list_param(name, default):
 
 class CubeDatasetCapture:
     def __init__(self):
-        # PickDeliverTask calls rospy.init_node and supplies calibrated movement
-        # helpers.  cargo_category only satisfies its constructor; all three
-        # models are captured below.
-        self.task = PickDeliverTask()
+        self.task = DatasetMotion()
         self.dataset_dir = os.path.abspath(os.path.expanduser(
             rospy.get_param("~dataset_dir", "~/smartcar-yolo-dataset")
         ))
