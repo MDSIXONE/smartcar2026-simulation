@@ -130,7 +130,7 @@ class PickDeliverTask:
             rospy.get_param("~vision_classify_view_timeout", 12.0)
         )
         self.vision_classify_tolerance_x = float(
-            rospy.get_param("~vision_classify_tolerance_x", 0.045)
+            rospy.get_param("~vision_classify_tolerance_x", 0.075)
         )
         self.vision_classify_tolerance_y = float(
             rospy.get_param("~vision_classify_tolerance_y", 0.055)

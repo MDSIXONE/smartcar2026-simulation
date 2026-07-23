@@ -20,7 +20,7 @@ vision_classify_center_x: [0.26, 0.50, 0.72]
 vision_classify_center_y: 0.515
 vision_classify_frames_per_view: 3
 vision_classify_view_timeout: 12.0
-vision_classify_tolerance_x: 0.045
+vision_classify_tolerance_x: 0.075
 vision_classify_tolerance_y: 0.055
 vision_align_timeout: 25.0
 vision_lost_timeout: 2.5
