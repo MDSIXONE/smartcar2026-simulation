@@ -1,4 +1,8 @@
-footprint: [[0.20, -0.14], [0.20, 0.14], [-0.20, 0.14], [-0.20, -0.14]]
+# Use the same physical collision envelope as the laser rollout controller.
+# A larger global-only footprint can declare the robot's current cell lethal
+# after a valid narrow-lane turn, leaving GlobalPlanner unable to replan from
+# the pose that CymPlanner safely reached.
+footprint: [[0.15, -0.10], [0.15, 0.10], [-0.15, 0.10], [-0.15, -0.10]]
 footprint_padding: 0.0
 transform_tolerance: 0.5
 

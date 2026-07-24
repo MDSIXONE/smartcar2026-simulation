@@ -15,6 +15,24 @@ PLANNER_CONFIG = (
     WORKSPACE_DIR / "src" / "cym_planner" / "config" / "cym_planner_params.json"
 )
 PLANNER_SOURCE = WORKSPACE_DIR / "src" / "cym_planner" / "src" / "cym_planner.cpp"
+GLOBAL_COSTMAP = (
+    WORKSPACE_DIR
+    / "src"
+    / "gazebo_nav"
+    / "launch"
+    / "config"
+    / "move_base"
+    / "global_costmap_common.yaml"
+)
+LOCAL_COSTMAP = (
+    WORKSPACE_DIR
+    / "src"
+    / "gazebo_nav"
+    / "launch"
+    / "config"
+    / "move_base"
+    / "local_costmap_common.yaml"
+)
 
 
 class Task3RealtimeBudgetTest(unittest.TestCase):
@@ -58,6 +76,17 @@ class Task3RealtimeBudgetTest(unittest.TestCase):
             "append_angular_candidate(desired_angular_velocity * 0.25)",
             planner_source,
         )
+        global_footprint = next(
+            line
+            for line in GLOBAL_COSTMAP.read_text(encoding="utf-8").splitlines()
+            if line.startswith("footprint:")
+        )
+        local_footprint = next(
+            line
+            for line in LOCAL_COSTMAP.read_text(encoding="utf-8").splitlines()
+            if line.startswith("footprint:")
+        )
+        self.assertEqual(global_footprint, local_footprint)
 
     def test_fast_launch_and_task_have_wall_clock_guards(self):
         launch = ET.parse(PREPARE_LAUNCH).getroot()
