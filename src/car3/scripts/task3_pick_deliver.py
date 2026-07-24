@@ -115,6 +115,15 @@ class PickDeliverTask:
         self.vision_scan_center_tolerance = float(
             rospy.get_param("~vision_scan_center_tolerance", 0.060)
         )
+        self.vision_quick_classify_frames = int(
+            rospy.get_param("~vision_quick_classify_frames", 5)
+        )
+        self.vision_quick_classify_timeout = float(
+            rospy.get_param("~vision_quick_classify_timeout", 1.5)
+        )
+        self.vision_quick_min_confidence = float(
+            rospy.get_param("~vision_quick_min_confidence", 0.75)
+        )
         self.vision_classify_stable_frames = int(
             rospy.get_param("~vision_classify_stable_frames", 7)
         )
@@ -696,7 +705,7 @@ class PickDeliverTask:
                 self.cmd_pub.publish(Twist())
                 self._status(
                     "Camera acquired a cube in %s region "
-                    "(YOLO raw=%s, confidence=%.3f); approaching the calibrated grasp view"
+                    "(YOLO raw=%s, confidence=%.3f); starting observation classification"
                     % (
                         region["display_name"],
                         cube["yolo_class_name"],
@@ -709,6 +718,94 @@ class PickDeliverTask:
         self._status(
             "No cube acquired in %s region; detector frames=%d"
             % (region["display_name"], seen_frames)
+        )
+        return None
+
+    def _quick_classify_observation(self, region, initial_detection):
+        """Return a class only when YOLO and the printed face agree repeatedly.
+
+        This fast path is allowed to skip a confidently non-target region while
+        the vehicle is still at its observation pose.  Any disagreement,
+        low-confidence frame, or timeout returns None so the existing
+        close-range alignment and seven-frame verification remains the safe
+        fallback.
+        """
+        deadline = rospy.Time.now() + rospy.Duration(
+            self.vision_quick_classify_timeout
+        )
+        last_sequence = -1
+        tracked_center = (
+            initial_detection["center_x"],
+            initial_detection["center_y"],
+        )
+        votes = []
+        rate = rospy.Rate(20)
+        try:
+            while not rospy.is_shutdown() and rospy.Time.now() < deadline:
+                frame = self._latest_frame(last_sequence)
+                if frame is None:
+                    rate.sleep()
+                    continue
+                last_sequence, image = frame
+                detections = self._detect(image, region)
+                if not detections:
+                    votes = []
+                    rate.sleep()
+                    continue
+                cube = min(
+                    detections,
+                    key=lambda item: (
+                        (item["center_x"] - tracked_center[0]) ** 2
+                        + (item["center_y"] - tracked_center[1]) ** 2
+                    ),
+                )
+                tracking_distance = math.hypot(
+                    cube["center_x"] - tracked_center[0],
+                    cube["center_y"] - tracked_center[1],
+                )
+                tracked_center = (cube["center_x"], cube["center_y"])
+                yolo_id = cube["yolo_class_id"]
+                template_id = cube["template_class_id"]
+                reliable = (
+                    tracking_distance <= 0.25
+                    and abs(
+                        region["grasp_target"][0] - cube["center_x"]
+                    ) <= self.vision_scan_center_tolerance
+                    and cube["confidence"] >= self.vision_quick_min_confidence
+                    and template_id is not None
+                    and template_id == yolo_id
+                )
+                if not reliable:
+                    votes = []
+                    rate.sleep()
+                    continue
+                if votes and votes[-1]["yolo_class_id"] != yolo_id:
+                    votes = []
+                votes.append(cube)
+                if len(votes) >= self.vision_quick_classify_frames:
+                    selected = max(
+                        votes, key=lambda item: item["confidence"]
+                    )
+                    self._status(
+                        "Observation camera classified %s region as %s "
+                        "(YOLO+template %d/%d, confidence %.3f..%.3f)"
+                        % (
+                            region["display_name"],
+                            selected["yolo_class_name"],
+                            len(votes),
+                            self.vision_quick_classify_frames,
+                            min(item["confidence"] for item in votes),
+                            max(item["confidence"] for item in votes),
+                        )
+                    )
+                    return selected
+                rate.sleep()
+        finally:
+            self.cmd_pub.publish(Twist())
+        self._status(
+            "Observation classification uncertain in %s; "
+            "using close-range verification"
+            % region["display_name"]
         )
         return None
 
@@ -986,6 +1083,25 @@ class PickDeliverTask:
             detection = self._scan_region(region)
             if detection is None:
                 continue
+            quick_classified = self._quick_classify_observation(
+                region, detection
+            )
+            if (
+                quick_classified is not None
+                and quick_classified["class_id"] != self.target_class_id
+            ):
+                self._status(
+                    "%s region is confidently not %s at the observation pose; "
+                    "skipping close approach"
+                    % (region["display_name"], self.category)
+                )
+                continue
+            if quick_classified is not None:
+                detection = quick_classified
+                self._status(
+                    "%s region may contain %s; confirming at grasp range"
+                    % (region["display_name"], self.category)
+                )
             if not self._vision_align(region, detection):
                 self._status(
                     "Could not visually align the cube in %s; continuing search"

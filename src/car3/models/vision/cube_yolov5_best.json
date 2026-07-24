@@ -12,10 +12,11 @@
     "1": "daily",
     "2": "electronics"
   },
-  "source_checkpoint": "cube_yolov5_best.pt",
-  "source_checkpoint_sha256": "CF95221F1F58AA9322F045EEC245CF14D04BD19E5ECCFF1A50FC6150898BE936",
-  "onnx_sha256": "7562DFF883B90D015A4C34211492C3209E229418D01C56EB38098CBD8F78EDFC",
-  "exporter": "ultralytics/yolov5 v7.0",
+  "source_checkpoint": "yolov5/yolov5/runs/train/cube_exp/weights/best.pt",
+  "source_checkpoint_sha256": "1F4CAB6590EA71AF22FA6A9C295515F9E3A34BD762E57C9BBB5C9835E0C2B20A",
+  "source_checkpoint_epoch": 20,
+  "onnx_sha256": "E45648A7E189C8893C3E5F0CA84ADC9D50675708BD70E0D1427335621442EF4E",
+  "exporter": "ultralytics/yolov5 6be609f3c4c0ff52cc34eb6160c7ca74dfec862c",
   "runtime": "onnxruntime 1.16.3",
   "label_verification": {
     "method": "perspective-corrected printed-face template correlation",
