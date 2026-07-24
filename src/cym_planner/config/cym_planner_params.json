@@ -26,7 +26,7 @@
         "reaction_time": 0.05,
 
         # 前视距离，数值越大越平滑，数值越小越贴近路径
-        "lookahead_distance": 0.5,
+        "lookahead_distance": 0.25,
 
         # 前进速度增益：前方路径点距离乘以该值，决定提速快慢
         "linear_x_gain": 1.5,

@@ -74,6 +74,7 @@ class Task3RealtimeBudgetTest(unittest.TestCase):
         self.assertAlmostEqual(float(planar.findtext("cmdTimeout")), 0.10)
 
         planner = PLANNER_CONFIG.read_text(encoding="utf-8")
+        self.assertIn('"lookahead_distance": 0.25', planner)
         self.assertIn('"safety_margin": 0.01', planner)
         self.assertIn('"max_vel_x": 0.5', planner)
         self.assertIn('"max_vel_theta": 3.0', planner)
