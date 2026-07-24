@@ -78,6 +78,11 @@ class Task3VisualPipelineTest(unittest.TestCase):
             search_body.index("_vision_align"),
             search_body.index("_classify_aligned_cube"),
         )
+        quick_body = source[
+            source.index("def _quick_classify_observation"):
+            source.index("def _inside_grasp_range")
+        ]
+        self.assertNotIn("vision_scan_center_tolerance", quick_body)
         self.assertNotIn("_classify_cube_multiview", source)
         self.assertNotIn("_collect_classification_view", source)
         self.assertNotIn("vision_label_guard", source)

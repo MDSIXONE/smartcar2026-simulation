@@ -770,9 +770,6 @@ class PickDeliverTask:
                 yolo_id = cube["yolo_class_id"]
                 reliable = (
                     tracking_distance <= 0.25
-                    and abs(
-                        region["grasp_target"][0] - cube["center_x"]
-                    ) <= self.vision_scan_center_tolerance
                     and cube["confidence"] >= self.vision_quick_min_confidence
                 )
                 if not reliable:
