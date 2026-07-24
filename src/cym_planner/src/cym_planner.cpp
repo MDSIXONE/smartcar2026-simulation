@@ -687,7 +687,7 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         ? final_yaw_max_vel_ * motion_scale : max_vel_theta_ * motion_scale;
     const double front_clearance = forwardClearance(laser_points);
     std::vector<double> angular_candidates;
-    angular_candidates.reserve(static_cast<std::size_t>(w_samples_ + 5));
+    angular_candidates.reserve(static_cast<std::size_t>(w_samples_ + 6));
     const auto append_angular_candidate =
         [&angular_candidates, max_angular_velocity](double value)
         {
@@ -714,6 +714,11 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     // an idle command plus fractional target-directed turns; otherwise the
     // shifted angular grid can omit w=0 and every candidate is rejected.
     append_angular_candidate(0.0);
+    if(std::abs(desired_angular_velocity) > 1e-6)
+    {
+        append_angular_candidate(std::copysign(
+            minimum_turn_velocity_, desired_angular_velocity));
+    }
     append_angular_candidate(desired_angular_velocity * 0.25);
     append_angular_candidate(desired_angular_velocity * 0.50);
     append_angular_candidate(desired_angular_velocity * 0.75);

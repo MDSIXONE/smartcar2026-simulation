@@ -21,7 +21,7 @@
 
         # 车体外扩安全距离、制动减速度和控制反应时间。
         # 候选速度的停车距离为 v^2/(2a) + v*t + safety_margin。
-        "safety_margin": 0.035,
+        "safety_margin": 0.01,
         "braking_deceleration": 3.0,
         "reaction_time": 0.05,
 

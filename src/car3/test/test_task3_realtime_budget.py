@@ -67,6 +67,7 @@ class Task3RealtimeBudgetTest(unittest.TestCase):
         self.assertAlmostEqual(float(planar.findtext("cmdTimeout")), 0.10)
 
         planner = PLANNER_CONFIG.read_text(encoding="utf-8")
+        self.assertIn('"safety_margin": 0.01', planner)
         self.assertIn('"max_vel_x": 0.6', planner)
         self.assertIn('"max_vel_theta": 2.0', planner)
         self.assertIn('"final_yaw_max_vel": 1.2', planner)
@@ -75,6 +76,9 @@ class Task3RealtimeBudgetTest(unittest.TestCase):
         self.assertIn(
             "append_angular_candidate(desired_angular_velocity * 0.25)",
             planner_source,
+        )
+        self.assertIn(
+            "minimum_turn_velocity_, desired_angular_velocity", planner_source
         )
         global_footprint = next(
             line
