@@ -722,13 +722,16 @@ class PickDeliverTask:
         return None
 
     def _quick_classify_observation(self, region, initial_detection):
-        """Return a class only when YOLO and the printed face agree repeatedly.
+        """Return a class after repeated high-confidence YOLO observations.
 
         This fast path is allowed to skip a confidently non-target region while
-        the vehicle is still at its observation pose.  Any disagreement,
-        low-confidence frame, or timeout returns None so the existing
-        close-range alignment and seven-frame verification remains the safe
-        fallback.
+        the vehicle is still at its observation pose.  The printed-face
+        template is intentionally not used here: in the distant observation
+        view it occupies too few pixels and caused long, unnecessary close
+        approaches even when the retrained YOLO model was stable.  Low
+        confidence, class changes, lost tracking, or timeout returns None so
+        the existing close-range alignment and seven-frame template
+        verification remains the safe fallback.
         """
         deadline = rospy.Time.now() + rospy.Duration(
             self.vision_quick_classify_timeout
@@ -765,15 +768,12 @@ class PickDeliverTask:
                 )
                 tracked_center = (cube["center_x"], cube["center_y"])
                 yolo_id = cube["yolo_class_id"]
-                template_id = cube["template_class_id"]
                 reliable = (
                     tracking_distance <= 0.25
                     and abs(
                         region["grasp_target"][0] - cube["center_x"]
                     ) <= self.vision_scan_center_tolerance
                     and cube["confidence"] >= self.vision_quick_min_confidence
-                    and template_id is not None
-                    and template_id == yolo_id
                 )
                 if not reliable:
                     votes = []
@@ -788,7 +788,7 @@ class PickDeliverTask:
                     )
                     self._status(
                         "Observation camera classified %s region as %s "
-                        "(YOLO+template %d/%d, confidence %.3f..%.3f)"
+                        "(YOLO %d/%d, confidence %.3f..%.3f)"
                         % (
                             region["display_name"],
                             selected["yolo_class_name"],

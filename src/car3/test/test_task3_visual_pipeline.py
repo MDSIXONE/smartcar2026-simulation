@@ -86,7 +86,7 @@ class Task3VisualPipelineTest(unittest.TestCase):
         config = yaml.safe_load(VISION_CONFIG.read_text(encoding="utf-8"))
         self.assertGreaterEqual(config["vision_scan_center_tolerance"], 0.05)
         self.assertGreaterEqual(config["vision_quick_classify_frames"], 3)
-        self.assertGreaterEqual(config["vision_quick_min_confidence"], 0.70)
+        self.assertGreaterEqual(config["vision_quick_min_confidence"], 0.85)
         self.assertGreater(config["vision_quick_classify_timeout"], 0.0)
         self.assertGreaterEqual(config["vision_classify_stable_frames"], 5)
         self.assertGreater(config["vision_classify_timeout"], 0.0)
@@ -190,20 +190,15 @@ class Task3VisualPipelineTest(unittest.TestCase):
             self.assertGreaterEqual(
                 detection["confidence"], 0.70, record["image"]
             )
-            if (
-                detection["confidence"]
-                >= config["vision_quick_min_confidence"]
-                and detection["template_class_id"]
-                == detection["yolo_class_id"]
-            ):
+            if detection["confidence"] >= config["vision_quick_min_confidence"]:
                 eligible_for_early_decision += 1
                 if record["grid_column"] == 1:
                     centered_eligible += 1
             if record["grid_column"] == 1:
                 centered_total += 1
             total += 1
-        self.assertGreaterEqual(eligible_for_early_decision, 115)
-        self.assertGreaterEqual(centered_eligible, 40)
+        self.assertGreaterEqual(eligible_for_early_decision, 40)
+        self.assertGreaterEqual(centered_eligible, 44)
         self.assertEqual(centered_total, 45)
         self.assertEqual(total, 135)
 

@@ -15,13 +15,13 @@ vision_scan_timeout: 15.0
 # Scanning only places a cube near image centre.  The vehicle then drives the
 # detected box into the recorded grasp range before the final class vote.
 vision_scan_center_tolerance: 0.060
-# At the observation pose, five consecutive frames must have a high-confidence
-# YOLO class and the perspective-corrected printed face must agree.  A
-# confidently non-target cube is skipped immediately; uncertainty falls back
-# to the calibrated close-range verification below.
+# At the observation pose, five consecutive frames from the retrained YOLO
+# model must keep the same high-confidence class.  The printed-face template is
+# deliberately reserved for the close-range verification below because it is
+# unreliable when the label occupies only a few distant pixels.
 vision_quick_classify_frames: 5
 vision_quick_classify_timeout: 1.5
-vision_quick_min_confidence: 0.75
+vision_quick_min_confidence: 0.90
 vision_classify_stable_frames: 7
 vision_classify_timeout: 5.0
 vision_template_min_score: 0.30
