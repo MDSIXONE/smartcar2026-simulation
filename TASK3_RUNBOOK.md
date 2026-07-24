@@ -35,13 +35,21 @@ rosnode kill -a
 
 ## 1. 终端 A：启动仿真并初始化机械臂
 
-可视化运行：
+正式运行（默认关闭 Gazebo 3D 窗口、打开 RViz）：
+
+```bash
+roslaunch car3 task3_prepare.launch
+```
+
+RViz 的 `Image` 面板默认显示 `/camera/rgb/image_raw`，任务带检测框的调试画面为
+`/sim_task3/vision/debug_image`。Gazebo 3D 窗口会与相机、RViz 争用渲染资源，正式
+计时不要打开；只在排查世界模型时使用：
 
 ```bash
 roslaunch car3 task3_prepare.launch gui:=true rviz:=true
 ```
 
-无界面自动测试：
+完全无界面的自动测试：
 
 ```bash
 roslaunch car3 task3_prepare.launch gui:=false rviz:=false
@@ -72,6 +80,36 @@ gripper_controller: stopped
 ```
 
 准备阶段会临时启用机械臂控制器，用两个中间阶段在 6 秒内平滑到达初始姿态；随后立即停止控制器。之后仅通过 Gazebo 姿态保持与关闭机械臂重力来固定关节，防止未受控的关节 3、4 在车辆行驶时漂移或看起来“断开”。
+
+### 实时时间与 150 秒限制
+
+正式世界使用 `0.01 s` 物理步长和 `100 Hz` 更新率，目标
+`real_time_factor=1.0`，即真实时间与 Gazebo 时间 `1:1`。RGB 相机以 `10 Hz`
+持续发布给 RViz 和 YOLO，未使用的深度相机改为按需启动。
+
+任务节点启动后先用 5 秒真实时间测量 `/clock`。实际实时率低于 `0.95` 时会直接
+报出 `RTF preflight failed`，不会在过载环境中继续计时。正常流程使用 145 秒
+真实时间硬预算，为 ROS 启停保留 5 秒余量；任何导航、视觉或机械臂等待都不能绕过
+该预算。
+
+检查实时率：
+
+```bash
+rostopic echo /gazebo/performance_metrics
+rostopic echo /sim_task3/status
+```
+
+预检应出现：
+
+```text
+RTF preflight passed: real_time_factor=... (target 1.000)
+```
+
+完成状态会同时记录真实耗时、Gazebo 时间和全程有效实时率：
+
+```text
+DONE: ...; wall=...s sim=...s effective_RTF=...
+```
 
 ## 2. 终端 B：发送物品任务
 
@@ -448,5 +486,5 @@ roslaunch car3 task3_execute.launch cargo_category:="食品" cargo_name:="自定
 
 ## 10. 测试记录
 
-旧版在无界面 Gazebo 中已验证过完整流程。当前视觉版应以
-`/sim_task3/vision/debug_image`、`/sim_task3/status` 和三类别各一次完整流程为验收依据。
+当前视觉版以 `/sim_task3/vision/debug_image`、`/sim_task3/status`、完成时
+`wall < 150s` 以及实时率接近 `1.0` 为验收依据。

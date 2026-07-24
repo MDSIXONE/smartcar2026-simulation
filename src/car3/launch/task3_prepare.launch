@@ -2,7 +2,7 @@
   <!-- Step 1 only: start the environment and park the arm.  The arm/gripper
        controllers are loaded but stopped, so navigation cannot make the arm
        shake. -->
-  <arg name="gui" default="true"/>
+  <arg name="gui" default="false"/>
   <arg name="rviz" default="true"/>
   <arg name="arm_start_pose" default="-0.0001,-0.4999,1.2800,1.7000,0.0000"/>
 

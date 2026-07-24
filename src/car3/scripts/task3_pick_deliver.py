@@ -10,6 +10,7 @@ Gazebo cube positions are intentionally never read by this runtime node.
 import math
 import os
 import threading
+import time
 
 import actionlib
 import cv2
@@ -26,6 +27,7 @@ from gazebo_msgs.msg import ModelState
 from gazebo_msgs.srv import GetLinkState, SetModelState
 from geometry_msgs.msg import Quaternion, Twist
 from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
+from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Float64, String
 from std_srvs.srv import Empty
@@ -69,6 +71,8 @@ def quaternion_from_yaw(yaw):
 class PickDeliverTask:
     def __init__(self):
         rospy.init_node("task3_pick_deliver")
+        self.task_wall_started = time.monotonic()
+        self.task_sim_started = rospy.Time.now()
 
         self.cargo_item = str(rospy.get_param("~cargo_item", "")).strip()
         requested_category = str(rospy.get_param("~cargo_category", "auto")).strip().lower()
@@ -87,7 +91,20 @@ class PickDeliverTask:
         )
         self.arm_grasp_duration = float(rospy.get_param("~arm_grasp_duration", 2.0))
         self.arm_carry_duration = float(rospy.get_param("~arm_carry_duration", 2.5))
-        self.nav_timeout = float(rospy.get_param("~nav_timeout", 110.0))
+        self.task_wall_budget = float(rospy.get_param("~task_wall_budget", 145.0))
+        self.rtf_preflight_duration = float(
+            rospy.get_param("~rtf_preflight_duration", 5.0)
+        )
+        self.rtf_minimum = float(rospy.get_param("~rtf_minimum", 0.95))
+        self.nav_timeout = float(rospy.get_param("~nav_timeout", 30.0))
+        self.nav_attempts = int(rospy.get_param("~nav_attempts", 2))
+        self.observation_position_tolerance = float(
+            rospy.get_param("~observation_position_tolerance", 0.12)
+        )
+        if self.task_wall_budget <= 0.0:
+            raise rospy.ROSException("task_wall_budget must be positive")
+        if self.nav_attempts <= 0:
+            raise rospy.ROSException("nav_attempts must be positive")
         self.camera_topic = rospy.get_param("~camera_topic", "/camera/rgb/image_raw")
         self.vision_model_path = os.path.abspath(
             os.path.expanduser(str(rospy.get_param("~vision_model_path")))
@@ -171,11 +188,13 @@ class PickDeliverTask:
         self.image_lock = threading.Lock()
         self.latest_image = None
         self.latest_image_sequence = 0
+        self.latest_odom = None
         self.grasp_state = "UNKNOWN"
         self.fallback_holding = False
         self.fallback_hold_timer = None
         rospy.Subscriber(self.camera_topic, Image, self._camera_callback, queue_size=1)
         rospy.Subscriber("/grasp_attach/state", String, self._grasp_state_callback, queue_size=1)
+        rospy.Subscriber("/odom", Odometry, self._odom_callback, queue_size=1)
 
         self.nav = actionlib.SimpleActionClient("move_base", MoveBaseAction)
         self.switch_controllers = rospy.ServiceProxy(
@@ -190,6 +209,7 @@ class PickDeliverTask:
         self._load_vision_model()
         # A fresh task must never inherit low-speed mode from an earlier run.
         self.carry_mode_pub.publish(Bool(data=False))
+        self.done_pub.publish(Bool(data=False))
 
     @staticmethod
     def _resolve_category(requested, item):
@@ -394,9 +414,35 @@ class PickDeliverTask:
     def _grasp_state_callback(self, message):
         self.grasp_state = message.data
 
+    def _odom_callback(self, message):
+        self.latest_odom = message
+
     def _status(self, text):
         rospy.loginfo(text)
         self.status_pub.publish(String(data=text))
+
+    def _wall_elapsed(self):
+        return time.monotonic() - self.task_wall_started
+
+    def _wall_remaining(self):
+        return self.task_wall_budget - self._wall_elapsed()
+
+    def _check_wall_budget(self, context):
+        if self._wall_remaining() > 0.0:
+            return
+        self.nav.cancel_all_goals()
+        self.cmd_pub.publish(Twist())
+        raise rospy.ROSException(
+            "task wall-clock budget %.1f seconds exceeded during %s"
+            % (self.task_wall_budget, context)
+        )
+
+    def _wall_pause(self, duration, context="task execution"):
+        deadline = time.monotonic() + max(0.0, float(duration))
+        while not rospy.is_shutdown() and time.monotonic() < deadline:
+            self._check_wall_budget(context)
+            time.sleep(max(0.0, min(0.05, deadline - time.monotonic())))
+        self._check_wall_budget(context)
 
     def _wait_for_services(self):
         for name in (
@@ -406,9 +452,42 @@ class PickDeliverTask:
             "/controller_manager/list_controllers",
         ):
             self._status("Waiting for %s" % name)
-            rospy.wait_for_service(name)
+            while not rospy.is_shutdown():
+                self._check_wall_budget("waiting for %s" % name)
+                try:
+                    rospy.wait_for_service(name, timeout=0.5)
+                    break
+                except rospy.ROSException:
+                    continue
         self._status("Waiting for move_base")
-        self.nav.wait_for_server()
+        while not rospy.is_shutdown():
+            self._check_wall_budget("waiting for move_base")
+            if self.nav.wait_for_server(rospy.Duration(0.5)):
+                break
+
+    def _verify_realtime_factor(self):
+        self._status(
+            "RTF preflight: measuring Gazebo for %.1f wall-clock seconds"
+            % self.rtf_preflight_duration
+        )
+        wall_started = time.monotonic()
+        sim_started = rospy.Time.now().to_sec()
+        deadline = wall_started + self.rtf_preflight_duration
+        while not rospy.is_shutdown() and time.monotonic() < deadline:
+            self._check_wall_budget("RTF preflight")
+            time.sleep(max(0.0, min(0.05, deadline - time.monotonic())))
+        wall_elapsed = max(time.monotonic() - wall_started, 1e-6)
+        sim_elapsed = rospy.Time.now().to_sec() - sim_started
+        measured_rtf = sim_elapsed / wall_elapsed
+        if measured_rtf < self.rtf_minimum:
+            raise rospy.ROSException(
+                "RTF preflight failed: measured %.3f, required at least %.3f"
+                % (measured_rtf, self.rtf_minimum)
+            )
+        self._status(
+            "RTF preflight passed: real_time_factor=%.3f (target 1.000)"
+            % measured_rtf
+        )
 
     def _latest_frame(self, after_sequence):
         with self.image_lock:
@@ -668,18 +747,17 @@ class PickDeliverTask:
         deadline = rospy.Time.now() + rospy.Duration(self.vision_scan_timeout)
         last_sequence = -1
         seen_frames = 0
-        rate = rospy.Rate(20)
         try:
             while not rospy.is_shutdown() and rospy.Time.now() < deadline:
                 frame = self._latest_frame(last_sequence)
                 if frame is None:
-                    rate.sleep()
+                    self._wall_pause(0.02, "camera region scan")
                     continue
                 last_sequence, image = frame
                 detections = self._detect(image, region)
                 if not detections:
                     self.cmd_pub.publish(Twist())
-                    rate.sleep()
+                    self._wall_pause(0.02, "camera region scan")
                     continue
 
                 cube = detections[0]
@@ -724,18 +802,17 @@ class PickDeliverTask:
             initial_detection["center_y"],
         )
         votes = []
-        rate = rospy.Rate(20)
         try:
             while not rospy.is_shutdown() and rospy.Time.now() < deadline:
                 frame = self._latest_frame(last_sequence)
                 if frame is None:
-                    rate.sleep()
+                    self._wall_pause(0.02, "observation classification")
                     continue
                 last_sequence, image = frame
                 detections = self._detect(image, region)
                 if not detections:
                     votes = []
-                    rate.sleep()
+                    self._wall_pause(0.02, "observation classification")
                     continue
                 cube = min(
                     detections,
@@ -756,7 +833,7 @@ class PickDeliverTask:
                 )
                 if not reliable:
                     votes = []
-                    rate.sleep()
+                    self._wall_pause(0.02, "observation classification")
                     continue
                 if votes and votes[-1]["yolo_class_id"] != yolo_id:
                     votes = []
@@ -778,7 +855,7 @@ class PickDeliverTask:
                         )
                     )
                     return selected
-                rate.sleep()
+                self._wall_pause(0.02, "observation classification")
         finally:
             self.cmd_pub.publish(Twist())
         self._status(
@@ -819,7 +896,6 @@ class PickDeliverTask:
             initial_detection["center_y"],
         )
         stable_frames = 0
-        rate = rospy.Rate(20)
         self._status(
             "Visual servo active in %s region; target box=(%.3f, %.3f, %.3f, %.3f)"
             % (
@@ -831,7 +907,7 @@ class PickDeliverTask:
             while not rospy.is_shutdown() and rospy.Time.now() < deadline:
                 frame = self._latest_frame(last_sequence)
                 if frame is None:
-                    rate.sleep()
+                    self._wall_pause(0.02, "visual alignment")
                     continue
                 last_sequence, image = frame
                 detections = self._detect(image, region)
@@ -864,7 +940,7 @@ class PickDeliverTask:
                     if missing_for >= 0.5 and last_horizontal_error != 0.0:
                         command.angular.z = math.copysign(0.10, last_horizontal_error)
                     self.cmd_pub.publish(command)
-                    rate.sleep()
+                    self._wall_pause(0.02, "visual alignment")
                     continue
 
                 last_seen = rospy.Time.now()
@@ -894,7 +970,7 @@ class PickDeliverTask:
                             )
                         )
                         return True
-                    rate.sleep()
+                    self._wall_pause(0.02, "visual alignment")
                     continue
 
                 stable_frames = 0
@@ -937,7 +1013,7 @@ class PickDeliverTask:
                         command.angular.z,
                     ),
                 )
-                rate.sleep()
+                self._wall_pause(0.02, "visual alignment")
         finally:
             self.cmd_pub.publish(Twist())
         self._status("Visual alignment timed out in %s region" % region["display_name"])
@@ -953,19 +1029,18 @@ class PickDeliverTask:
         deadline = rospy.Time.now() + rospy.Duration(self.vision_classify_timeout)
         last_sequence = -1
         votes = []
-        rate = rospy.Rate(20)
         target_x, target_y = region["grasp_target"][:2]
         try:
             while not rospy.is_shutdown() and rospy.Time.now() < deadline:
                 frame = self._latest_frame(last_sequence)
                 if frame is None:
-                    rate.sleep()
+                    self._wall_pause(0.02, "grasp-view classification")
                     continue
                 last_sequence, image = frame
                 detections = self._detect(image, region)
                 if not detections:
                     votes = []
-                    rate.sleep()
+                    self._wall_pause(0.02, "grasp-view classification")
                     continue
                 cube = min(
                     detections,
@@ -979,12 +1054,12 @@ class PickDeliverTask:
                     or cube["template_class_id"] is None
                 ):
                     votes = []
-                    rate.sleep()
+                    self._wall_pause(0.02, "grasp-view classification")
                     continue
                 votes.append(cube)
                 if len(votes) >= self.vision_classify_stable_frames:
                     break
-                rate.sleep()
+                self._wall_pause(0.02, "grasp-view classification")
         finally:
             self.cmd_pub.publish(Twist())
 
@@ -1044,6 +1119,7 @@ class PickDeliverTask:
             if not self._move_base(
                 region["observation_goal"],
                 "%s visual observation pose" % region["display_name"],
+                position_only=True,
             ):
                 self._status(
                     "Cannot reach %s observation pose; continuing search"
@@ -1054,7 +1130,7 @@ class PickDeliverTask:
             # success.  Relinquish navigation before camera steering starts.
             self.nav.cancel_all_goals()
             self.cmd_pub.publish(Twist())
-            rospy.sleep(0.20)
+            self._wall_pause(0.20, "stopping at visual observation pose")
             self._status(
                 "Scanning %s region for %s with YOLOv5"
                 % (region["display_name"], self.category)
@@ -1106,30 +1182,72 @@ class PickDeliverTask:
             % self.category
         )
 
-    def _move_base(self, goal, description):
+    def _observation_position_reached(self, goal):
+        if self.latest_odom is None:
+            return False
+        position = self.latest_odom.pose.pose.position
+        return math.hypot(position.x - goal[0], position.y - goal[1]) <= (
+            self.observation_position_tolerance
+        )
+
+    def _move_base(self, goal, description, position_only=False):
         message = MoveBaseGoal()
         message.target_pose.header.frame_id = "map"
-        message.target_pose.header.stamp = rospy.Time.now()
         message.target_pose.pose.position.x = goal[0]
         message.target_pose.pose.position.y = goal[1]
         message.target_pose.pose.orientation = quaternion_from_yaw(goal[2])
         self._status(
             "Navigating to %s: (%.4f, %.4f, %.4f)" % (description, goal[0], goal[1], goal[2])
         )
-        for attempt in range(1, 4):
+        terminal_states = {
+            GoalStatus.PREEMPTED,
+            GoalStatus.ABORTED,
+            GoalStatus.REJECTED,
+            GoalStatus.RECALLED,
+            GoalStatus.LOST,
+        }
+        for attempt in range(1, self.nav_attempts + 1):
+            self._check_wall_budget("navigation to %s" % description)
+            message.target_pose.header.stamp = rospy.Time.now()
             self.nav.send_goal(message)
-            if self.nav.wait_for_result(rospy.Duration(self.nav_timeout)):
-                if self.nav.get_state() == GoalStatus.SUCCEEDED:
+            attempt_deadline = time.monotonic() + self.nav_timeout
+            position_samples = 0
+            while not rospy.is_shutdown() and time.monotonic() < attempt_deadline:
+                self._check_wall_budget("navigation to %s" % description)
+                state = self.nav.get_state()
+                if state == GoalStatus.SUCCEEDED:
                     return True
-                self._status("move_base attempt %d returned state %d; retrying" % (attempt, self.nav.get_state()))
+                if position_only and self._observation_position_reached(goal):
+                    position_samples += 1
+                    if position_samples >= 3:
+                        self.nav.cancel_all_goals()
+                        self.cmd_pub.publish(Twist())
+                        self._status(
+                            "Observation position reached within %.2f m; "
+                            "final camera alignment is delegated to visual servo"
+                            % self.observation_position_tolerance
+                        )
+                        return True
+                else:
+                    position_samples = 0
+                if state in terminal_states:
+                    self._status(
+                        "move_base attempt %d returned state %d; retrying"
+                        % (attempt, state)
+                    )
+                    break
+                self._wall_pause(0.05, "navigation to %s" % description)
             else:
-                self._status("move_base attempt %d timed out; retrying" % attempt)
+                self._status(
+                    "move_base attempt %d timed out after %.1f wall-clock "
+                    "seconds; retrying" % (attempt, self.nav_timeout)
+                )
             self.nav.cancel_all_goals()
             try:
                 self.clear_costmaps()
             except rospy.ServiceException:
                 pass
-            rospy.sleep(1.0)
+            self._wall_pause(0.25, "navigation retry")
         return False
 
     def _start_arm_control(self):
@@ -1138,8 +1256,8 @@ class PickDeliverTask:
         # transient connection when task3_execute is launched in a new shell.
         for _ in range(3):
             self.arm_control_enabled_pub.publish(Bool(data=True))
-            rospy.sleep(0.08)
-        rospy.sleep(0.25)
+            self._wall_pause(0.08, "enabling arm control")
+        self._wall_pause(0.25, "enabling arm control")
 
         for _ in range(12):
             states = {
@@ -1159,9 +1277,9 @@ class PickDeliverTask:
             request.start_asap = True
             request.timeout = 2.0
             if self.switch_controllers(request).ok:
-                rospy.sleep(0.15)
+                self._wall_pause(0.15, "starting arm controllers")
                 continue
-            rospy.sleep(0.20)
+            self._wall_pause(0.20, "starting arm controllers")
         states = {
             controller.name: controller.state
             for controller in self.list_controllers().controller
@@ -1180,20 +1298,20 @@ class PickDeliverTask:
         message.points = [point]
         for _ in range(3):
             self.arm_pub.publish(message)
-            rospy.sleep(0.05)
-        rospy.sleep(duration + 0.20)
+            self._wall_pause(0.05, "publishing arm trajectory")
+        self._wall_pause(duration + 0.20, "moving arm")
 
     def _set_gripper(self, position):
         for _ in range(3):
             self.gripper_pub.publish(Float64(data=position))
-            rospy.sleep(0.08)
+            self._wall_pause(0.08, "moving gripper")
 
     def _wait_for_grasp_state(self, wanted, timeout):
-        deadline = rospy.Time.now() + rospy.Duration(timeout)
-        while not rospy.is_shutdown() and rospy.Time.now() < deadline:
+        deadline = time.monotonic() + timeout
+        while not rospy.is_shutdown() and time.monotonic() < deadline:
             if self.grasp_state == wanted:
                 return True
-            rospy.sleep(0.05)
+            self._wall_pause(0.05, "waiting for gripper state")
         return self.grasp_state == wanted
 
     def _set_cargo_to_tcp(self):
@@ -1230,7 +1348,7 @@ class PickDeliverTask:
             # again so grasp_attach can bind it.
             self._status("Physical overlap was not detected; using final TCP attachment fallback")
             self._set_gripper(1.0)
-            rospy.sleep(0.30)
+            self._wall_pause(0.30, "preparing TCP attachment fallback")
             self._set_cargo_to_tcp()
             self._set_gripper(0.76)
             if not self._wait_for_grasp_state("GRASPING", 1.5):
@@ -1248,6 +1366,9 @@ class PickDeliverTask:
 
     def run(self):
         self._wait_for_services()
+        if self.task_sim_started.to_sec() <= 0.0:
+            self.task_sim_started = rospy.Time.now()
+        self._verify_realtime_factor()
         region = self._find_and_align_target()
         self._status(
             "%s was selected from camera recognition in %s region"
@@ -1258,7 +1379,23 @@ class PickDeliverTask:
         if not self._move_base(self.destination, self.destination_name):
             raise rospy.ROSException("cannot reach %s" % self.destination_name)
         self.cmd_pub.publish(Twist())
-        result = "%s delivered to %s; gripper remains closed" % (self.cargo_name, self.destination_name)
+        self._check_wall_budget("publishing completion")
+        wall_elapsed = self._wall_elapsed()
+        sim_elapsed = max(
+            0.0, (rospy.Time.now() - self.task_sim_started).to_sec()
+        )
+        effective_rtf = sim_elapsed / max(wall_elapsed, 1e-6)
+        result = (
+            "%s delivered to %s; gripper remains closed; "
+            "wall=%.1fs sim=%.1fs effective_RTF=%.3f"
+            % (
+                self.cargo_name,
+                self.destination_name,
+                wall_elapsed,
+                sim_elapsed,
+                effective_rtf,
+            )
+        )
         self._status("DONE: " + result)
         self.done_pub.publish(Bool(data=True))
         rospy.spin()

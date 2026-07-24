@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+
+import pathlib
+import unittest
+import xml.etree.ElementTree as ET
+
+
+PACKAGE_DIR = pathlib.Path(__file__).resolve().parents[1]
+WORKSPACE_DIR = PACKAGE_DIR.parents[1]
+WORLD = PACKAGE_DIR / "world" / "math.world"
+URDF = PACKAGE_DIR / "urdf" / "car3.urdf"
+PREPARE_LAUNCH = PACKAGE_DIR / "launch" / "task3_prepare.launch"
+TASK_SCRIPT = PACKAGE_DIR / "scripts" / "task3_pick_deliver.py"
+
+
+class Task3RealtimeBudgetTest(unittest.TestCase):
+    def test_world_targets_one_to_one_simulation_time(self):
+        root = ET.parse(WORLD).getroot()
+        physics = root.find(".//world/physics")
+        self.assertIsNotNone(physics)
+        self.assertAlmostEqual(float(physics.findtext("max_step_size")), 0.01)
+        self.assertAlmostEqual(
+            float(physics.findtext("real_time_update_rate")), 100.0
+        )
+        self.assertAlmostEqual(float(physics.findtext("real_time_factor")), 1.0)
+        self.assertEqual(root.findtext(".//world/scene/shadows"), "0")
+
+    def test_unused_depth_rendering_is_lazy_and_rgb_is_ten_hertz(self):
+        root = ET.parse(URDF).getroot()
+        sensors = {
+            sensor.get("name"): sensor
+            for sensor in root.findall(".//gazebo/sensor")
+        }
+        rgb = sensors["rgb_camera"]
+        depth = sensors["depth_camera"]
+        self.assertEqual(rgb.findtext("update_rate"), "10")
+        self.assertEqual(rgb.findtext("visualize"), "false")
+        self.assertEqual(depth.findtext("always_on"), "false")
+        self.assertEqual(depth.findtext("update_rate"), "5")
+        self.assertEqual(
+            depth.find("./plugin/alwaysOn").text, "false"
+        )
+
+    def test_fast_launch_and_task_have_wall_clock_guards(self):
+        launch = ET.parse(PREPARE_LAUNCH).getroot()
+        args = {arg.get("name"): arg.get("default") for arg in launch.findall("arg")}
+        self.assertEqual(args["gui"], "false")
+        self.assertEqual(args["rviz"], "true")
+
+        source = TASK_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("task_wall_budget", source)
+        self.assertIn("time.monotonic()", source)
+        self.assertIn("position_only", source)
+        self.assertIn("Odometry", source)
+        self.assertIn("RTF preflight", source)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -7,6 +7,15 @@
 # order, recognises the requested class, and drives the detected box into the
 # corresponding acceptance range.
 
+# Timing and navigation bounds.  A five-second startup sample rejects an
+# overloaded simulator before a run can silently exceed the match limit.
+task_wall_budget: 145.0
+rtf_preflight_duration: 5.0
+rtf_minimum: 0.95
+nav_timeout: 30.0
+nav_attempts: 2
+observation_position_tolerance: 0.12
+
 vision_class_names: [food, daily, electronics]
 vision_confidence_threshold: 0.20
 vision_nms_threshold: 0.45
