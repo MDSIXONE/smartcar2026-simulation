@@ -686,9 +686,16 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         }
         const double heading_error = std::atan2(target_pose.pose.position.y,
                                                 target_pose.pose.position.x);
-        desired_linear_velocity = clampValue(
+        const double nominal_linear_velocity = clampValue(
             target_pose.pose.position.x * linear_x_gain_ * motion_scale,
             0.0, max_vel_x_ * motion_scale);
+        // Do not enter a tight bend at straight-line speed.  Squared cosine
+        // keeps gentle curves fast while giving the angular controller time to
+        // turn the complete physical footprint before it reaches the wall.
+        const double heading_cosine = std::cos(heading_error);
+        const double turn_speed_scale = clampValue(
+            heading_cosine * heading_cosine, 0.15, 1.0);
+        desired_linear_velocity = nominal_linear_velocity * turn_speed_scale;
         desired_angular_velocity = clampValue(
             heading_error * angular_gain_ * motion_scale,
             -max_vel_theta_ * motion_scale, max_vel_theta_ * motion_scale);

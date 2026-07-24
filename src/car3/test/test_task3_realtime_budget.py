@@ -75,11 +75,12 @@ class Task3RealtimeBudgetTest(unittest.TestCase):
 
         planner = PLANNER_CONFIG.read_text(encoding="utf-8")
         self.assertIn('"safety_margin": 0.01', planner)
-        self.assertIn('"max_vel_x": 0.6', planner)
-        self.assertIn('"max_vel_theta": 2.0', planner)
+        self.assertIn('"max_vel_x": 0.5', planner)
+        self.assertIn('"max_vel_theta": 3.0', planner)
         self.assertIn('"final_yaw_max_vel": 1.2', planner)
         planner_source = PLANNER_SOURCE.read_text(encoding="utf-8")
         self.assertIn("Self returns are necessarily inside", planner_source)
+        self.assertIn("heading_cosine * heading_cosine", planner_source)
         self.assertIn("append_angular_candidate(0.0)", planner_source)
         self.assertIn(
             "append_angular_candidate(desired_angular_velocity * 0.25)",

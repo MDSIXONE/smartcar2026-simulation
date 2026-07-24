@@ -35,16 +35,16 @@
         "linear_y_gain": 5.0,
 
         # 转向增益：数值越大，车头对准路径的力度越强
-        "angular_gain": 2.5,
+        "angular_gain": 4.0,
 
         # 最大前进速度，单位 m/s
-        "max_vel_x": 0.6,
+        "max_vel_x": 0.5,
 
         # 当前禁止横向平移，此参数暂不参与车辆控制
         "max_vel_y": 15.0,
 
         # 最大旋转速度，单位 rad/s
-        "max_vel_theta": 2.0,
+        "max_vel_theta": 3.0,
 
         # 到达路径终点后的独立朝向对准参数。
         # final_yaw_gain 越大，终点旋转越快；建议 1.5 ~ 3.0。
