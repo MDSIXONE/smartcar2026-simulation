@@ -983,8 +983,10 @@
           <horizontal>
             <samples>720</samples>
             <resolution>1</resolution>
-            <min_angle>-1.57</min_angle>  
-            <max_angle>1.57</max_angle>   
+            <!-- Full-circle coverage is required for collision-safe in-place
+                 turns: side and rear walls must remain in the point cloud. -->
+            <min_angle>-3.14159</min_angle>
+            <max_angle>3.14159</max_angle>
           </horizontal>
         </scan>
         <range>

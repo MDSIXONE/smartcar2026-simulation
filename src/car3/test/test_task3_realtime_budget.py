@@ -55,12 +55,19 @@ class Task3RealtimeBudgetTest(unittest.TestCase):
         }
         rgb = sensors["rgb_camera"]
         depth = sensors["depth_camera"]
+        laser = sensors["head_hokuyo_sensor"]
         self.assertEqual(rgb.findtext("update_rate"), "10")
         self.assertEqual(rgb.findtext("visualize"), "false")
         self.assertEqual(depth.findtext("always_on"), "false")
         self.assertEqual(depth.findtext("update_rate"), "5")
         self.assertEqual(
             depth.find("./plugin/alwaysOn").text, "false"
+        )
+        self.assertAlmostEqual(
+            float(laser.findtext("./ray/scan/horizontal/min_angle")), -3.14159
+        )
+        self.assertAlmostEqual(
+            float(laser.findtext("./ray/scan/horizontal/max_angle")), 3.14159
         )
         planar = root.find(".//gazebo/plugin[@name='planar_controller']")
         self.assertIsNotNone(planar)
