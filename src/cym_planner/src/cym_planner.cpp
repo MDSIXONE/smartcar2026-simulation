@@ -248,6 +248,17 @@ void CymPlanner::scanCallback(const sensor_msgs::LaserScan::ConstPtr& scan)
         const double angle = scan->angle_min + index * scan->angle_increment;
         const tf::Vector3 laser_point(range * std::cos(angle), range * std::sin(angle), 0.0);
         const tf::Vector3 base_point = laser_to_base * laser_point;
+        // A 360-degree Gazebo ray sensor can see the robot mesh behind its
+        // forward-mounted origin.  Self returns are necessarily inside the
+        // physical footprint and must not be treated as external obstacles.
+        // Points on or outside the boundary remain core collision input.
+        if(base_point.x() > footprint_min_x_ &&
+           base_point.x() < footprint_max_x_ &&
+           base_point.y() > footprint_min_y_ &&
+           base_point.y() < footprint_max_y_)
+        {
+            continue;
+        }
         filtered_points.push_back({base_point.x(), base_point.y()});
     }
 
