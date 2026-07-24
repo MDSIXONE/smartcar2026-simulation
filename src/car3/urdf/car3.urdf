@@ -966,6 +966,9 @@
       <odometryRate>30</odometryRate>
       <robotBaseFrame>base_footprint</robotBaseFrame>
       <bodyName>base_link</bodyName>
+      <!-- Stop the kinematic base when move_base rejects a cycle.  Without a
+           timeout Gazebo keeps replaying the last non-zero command forever. -->
+      <cmdTimeout>0.10</cmdTimeout>
     </plugin>
   </gazebo>
 

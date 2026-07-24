@@ -686,8 +686,42 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     const double max_angular_velocity = pose_adjusting_
         ? final_yaw_max_vel_ * motion_scale : max_vel_theta_ * motion_scale;
     const double front_clearance = forwardClearance(laser_points);
+    std::vector<double> angular_candidates;
+    angular_candidates.reserve(static_cast<std::size_t>(w_samples_ + 5));
+    const auto append_angular_candidate =
+        [&angular_candidates, max_angular_velocity](double value)
+        {
+            const double bounded = clampValue(
+                value, -max_angular_velocity, max_angular_velocity);
+            for(const double existing : angular_candidates)
+            {
+                if(std::abs(existing - bounded) < 1e-6)
+                {
+                    return;
+                }
+            }
+            angular_candidates.push_back(bounded);
+        };
+    for(int w_index = 0; w_index < w_samples_; ++w_index)
+    {
+        const double center = 0.5 * static_cast<double>(w_samples_ - 1);
+        const double angular_offset = (static_cast<double>(w_index) - center) /
+            std::max(1.0, center) * max_angular_velocity;
+        append_angular_candidate(desired_angular_velocity + angular_offset);
+    }
+    // Near a wall, a full desired turn can collide over the rollout horizon
+    // even though a slower turn in the same direction is safe.  Always sample
+    // an idle command plus fractional target-directed turns; otherwise the
+    // shifted angular grid can omit w=0 and every candidate is rejected.
+    append_angular_candidate(0.0);
+    append_angular_candidate(desired_angular_velocity * 0.25);
+    append_angular_candidate(desired_angular_velocity * 0.50);
+    append_angular_candidate(desired_angular_velocity * 0.75);
+    append_angular_candidate(desired_angular_velocity);
+
     std::vector<CandidateTrajectory> candidates;
-    candidates.reserve(static_cast<std::size_t>(v_samples_ * w_samples_));
+    candidates.reserve(
+        static_cast<std::size_t>(v_samples_) * angular_candidates.size());
     int selected_index = -1;
     double best_score = -std::numeric_limits<double>::infinity();
     // In path-following mode, heading points at the local path target.  Once
@@ -704,14 +738,8 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         const double fraction = static_cast<double>(v_index) /
             static_cast<double>(v_samples_ - 1);
         const double candidate_linear_velocity = desired_linear_velocity * fraction;
-        for(int w_index = 0; w_index < w_samples_; ++w_index)
+        for(const double candidate_angular_velocity : angular_candidates)
         {
-            const double center = 0.5 * static_cast<double>(w_samples_ - 1);
-            const double angular_offset = (static_cast<double>(w_index) - center) /
-                std::max(1.0, center) * max_angular_velocity;
-            const double candidate_angular_velocity = clampValue(
-                desired_angular_velocity + angular_offset,
-                -max_angular_velocity, max_angular_velocity);
             CandidateTrajectory candidate = simulateTrajectory(
                 candidate_linear_velocity, candidate_angular_velocity, laser_points,
                 front_clearance);

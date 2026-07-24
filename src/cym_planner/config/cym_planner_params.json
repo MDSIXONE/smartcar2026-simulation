@@ -29,29 +29,29 @@
         "lookahead_distance": 0.5,
 
         # 前进速度增益：前方路径点距离乘以该值，决定提速快慢
-        "linear_x_gain": 5.0,
+        "linear_x_gain": 1.5,
 
         # 当前禁止横向平移，此参数暂不参与车辆控制
         "linear_y_gain": 5.0,
 
         # 转向增益：数值越大，车头对准路径的力度越强
-        "angular_gain": 14.0,
+        "angular_gain": 2.5,
 
         # 最大前进速度，单位 m/s
-        "max_vel_x": 6.0,
+        "max_vel_x": 0.6,
 
         # 当前禁止横向平移，此参数暂不参与车辆控制
         "max_vel_y": 15.0,
 
         # 最大旋转速度，单位 rad/s
-        "max_vel_theta": 15.5,
+        "max_vel_theta": 2.0,
 
         # 到达路径终点后的独立朝向对准参数。
         # final_yaw_gain 越大，终点旋转越快；建议 1.5 ~ 3.0。
-        "final_yaw_gain": 12.0,
+        "final_yaw_gain": 2.5,
 
         # 终点旋转速度上限，单位 rad/s；建议 0.8 ~ 1.5。
-        "final_yaw_max_vel": 10.2,
+        "final_yaw_max_vel": 1.2,
 
         # 终点方向误差小于该值即视为完成，单位 rad。
         "final_yaw_tolerance": 0.10,
