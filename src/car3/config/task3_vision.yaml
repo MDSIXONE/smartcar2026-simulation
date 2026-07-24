@@ -12,9 +12,6 @@ vision_confidence_threshold: 0.20
 vision_nms_threshold: 0.45
 vision_input_size: 640
 vision_scan_timeout: 15.0
-# Scanning only places a cube near image centre.  The vehicle then drives the
-# detected box into the recorded grasp range before the final class vote.
-vision_scan_center_tolerance: 0.060
 # At the observation pose, five consecutive frames from the retrained YOLO
 # model must keep the same high-confidence class.  The printed-face template is
 # deliberately reserved for the close-range verification below because it is

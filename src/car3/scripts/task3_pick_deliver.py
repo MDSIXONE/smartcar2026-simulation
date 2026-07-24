@@ -112,9 +112,6 @@ class PickDeliverTask:
         self.vision_nms = float(rospy.get_param("~vision_nms_threshold", 0.45))
         self.vision_input_size = int(rospy.get_param("~vision_input_size", 640))
         self.vision_scan_timeout = float(rospy.get_param("~vision_scan_timeout", 8.0))
-        self.vision_scan_center_tolerance = float(
-            rospy.get_param("~vision_scan_center_tolerance", 0.060)
-        )
         self.vision_quick_classify_frames = int(
             rospy.get_param("~vision_quick_classify_frames", 5)
         )
@@ -687,21 +684,6 @@ class PickDeliverTask:
 
                 cube = detections[0]
                 seen_frames += 1
-                horizontal_error = region["grasp_target"][0] - cube["center_x"]
-                if abs(horizontal_error) > self.vision_scan_center_tolerance:
-                    command = Twist()
-                    command.angular.z = clamp(
-                        self.vision_angular_gain * horizontal_error,
-                        -0.25,
-                        0.25,
-                    )
-                    command.angular.z = self._ensure_minimum_speed(
-                        command.angular.z, 0.055
-                    )
-                    self.cmd_pub.publish(command)
-                    rate.sleep()
-                    continue
-
                 self.cmd_pub.publish(Twist())
                 self._status(
                     "Camera acquired a cube in %s region "

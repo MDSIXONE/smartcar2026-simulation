@@ -83,13 +83,17 @@ class Task3VisualPipelineTest(unittest.TestCase):
             source.index("def _inside_grasp_range")
         ]
         self.assertNotIn("vision_scan_center_tolerance", quick_body)
+        scan_body = source[
+            source.index("def _scan_region"):
+            source.index("def _quick_classify_observation")
+        ]
+        self.assertNotIn("angular.z", scan_body)
         self.assertNotIn("_classify_cube_multiview", source)
         self.assertNotIn("_collect_classification_view", source)
         self.assertNotIn("vision_label_guard", source)
 
     def test_search_order_and_grasp_calibration_are_complete(self):
         config = yaml.safe_load(VISION_CONFIG.read_text(encoding="utf-8"))
-        self.assertGreaterEqual(config["vision_scan_center_tolerance"], 0.05)
         self.assertGreaterEqual(config["vision_quick_classify_frames"], 3)
         self.assertGreaterEqual(config["vision_quick_min_confidence"], 0.85)
         self.assertGreater(config["vision_quick_classify_timeout"], 0.0)
